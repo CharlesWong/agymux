@@ -62,6 +62,21 @@ struct AgymuxCLI {
           max-threads         Max active threads per profile (default: 3)
           reserved-fallback   prompt (default), never, auto
           stickiness-quota    Minimum quota to maintain prompt cache stickiness (default: 15%)
+
+        \u{001B}[1mFOR AI AGENTS & AUTOMATION HARNESSES:\u{001B}[0m
+          • \u{001B}[1mHeadless Execution\u{001B}[0m: Always pass -p / --print in subshells/scripts to prevent TTY hangs.
+          • \u{001B}[1mInference Cache Locality\u{001B}[0m: Always continue multi-turn tasks with:
+              agyx -c -p "<instruction>" --output-format json
+            agyx automatically maintains profile stickiness when quota >= 15%, hitting the
+            server-side prompt/KV cache and saving 75%-90% input token cost and latency.
+          • \u{001B}[1mStructured Output\u{001B}[0m: Pass --output-format json for clean, parseable JSON payloads:
+              {"status": "SUCCESS", "response": "...", "conversation_id": "...", "usage": {...}}
+          • \u{001B}[1mPersistent Harness Daemon\u{001B}[0m: For multi-turn agent harnesses without process respawn:
+              agyx -p --input-format stream-json --output-format stream-json
+          • \u{001B}[1mAutonomous Failover\u{001B}[0m: Do not implement quota retry loops. agyx detects 429 and
+            RESOURCE_EXHAUSTED errors and migrates profiles across the Auto Pool automatically.
+          • \u{001B}[1mReserved Pool Etiquette\u{001B}[0m: Never pass '--profile current' unless explicitly ordered
+            by the human user; allow agyx to route autonomously across Auto Pool commodity profiles.
         """)
     }
 

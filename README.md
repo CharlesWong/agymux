@@ -105,14 +105,39 @@ agyx config set max-threads 3
 
 # Configure reserved fallback mode (prompt | never | auto)
 agyx config set reserved-fallback prompt
+
+# Configure stickiness minimum quota threshold (defaults to 15%)
+agyx config set stickiness-quota 15%
 ```
+
+---
+
+## 🤖 Guidelines for AI Agents & Automation Harnesses
+
+When invoking `agyx` programmatically from subagents, background jobs, or CI/CD pipelines:
+
+1. **Always pass `-p` / `--print`**: Running bare `agyx` requires a full interactive terminal TTY. Headless processes will hang on stdin if `-p` is omitted.
+2. **Preserve Prompt Cache**: For multi-turn tasks, chain rounds with:
+   ```bash
+   agyx -c -p "<next instruction>" --output-format json
+   ```
+   `agyx` automatically locks to the previous account if quota is $\ge 15\%$, hitting the server-side prompt/KV cache and saving 75%–90% of input token quota and latency.
+3. **Structured JSON Output**: Use `--output-format json` to get machine-parseable outputs containing `conversation_id`, `response`, and token `usage`.
+4. **Persistent Daemon / IPC**: For continuous multi-turn harnesses without process spawn overhead:
+   ```bash
+   agyx -p --input-format stream-json --output-format stream-json
+   ```
+5. **No Need for Retry Loops**: Do not implement 429/quota retry logic in agent harnesses. `agyx` intercepts `RESOURCE_EXHAUSTED` and migrates profiles across the Auto Pool autonomously.
+6. **Reserved Pool Protection**: Never pass `--profile current` unless explicitly commanded by the human user.
 
 ---
 
 ## 🏗️ Architecture & Storage
 
 - **Configuration**: `~/.agymux/pools.json`
+- **Stickiness Registry**: `~/.agymux/stickiness.json`
 - **Active Sessions**: `~/.agymux/sessions/<pid>.json`
 - **Lock File**: `~/.agymux/switch.lock`
 - **Credential Storage**: Reuses `~/.aisw/profiles/antigravity/` and macOS Keychain (`gemini / antigravity`)
 - **Shared Workspace**: Leverages shared `~/.gemini/antigravity-cli` (conversations, brain, history)
+
