@@ -1,0 +1,34 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Credentials, tokens, and sensitive caches
+credentials*.json
+keyring*.json
+token*.json
+*.secret
+*.pem
+*.key
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local environment and runtime stores
+.env
+.env.*
+pools.json
+stickiness.json
+sessions/
