@@ -4,8 +4,17 @@ import Foundation
 
 @Suite("QuotaStrategies Tests")
 struct QuotaStrategiesTests {
-    private func makeSnapshot(profileID: String, gemini5h: Double, thirdParty5h: Double, resetInMinutes: Double = 120) -> QuotaSnapshot {
+    private func makeSnapshot(
+        profileID: String,
+        gemini5h: Double,
+        thirdParty5h: Double,
+        geminiWeekly: Double = 1.0,
+        thirdPartyWeekly: Double = 1.0,
+        resetInMinutes: Double = 120,
+        weeklyResetInHours: Double = 72
+    ) -> QuotaSnapshot {
         let resetAt = Date().addingTimeInterval(resetInMinutes * 60)
+        let weeklyResetAt = Date().addingTimeInterval(weeklyResetInHours * 3600)
         let metrics: [QuotaMetric] = [
             QuotaMetric(
                 group: .gemini,
@@ -14,6 +23,17 @@ struct QuotaStrategiesTests {
                 window: .fiveHour,
                 remainingFraction: gemini5h,
                 resetAt: resetAt,
+                source: .cloudQuotaSummary,
+                fetchedAt: .now,
+                confidence: .high
+            ),
+            QuotaMetric(
+                group: .gemini,
+                scope: .geminiFamily,
+                modelIDs: [],
+                window: .weekly,
+                remainingFraction: geminiWeekly,
+                resetAt: weeklyResetAt,
                 source: .cloudQuotaSummary,
                 fetchedAt: .now,
                 confidence: .high
@@ -28,6 +48,17 @@ struct QuotaStrategiesTests {
                 source: .cloudQuotaSummary,
                 fetchedAt: .now,
                 confidence: .high
+            ),
+            QuotaMetric(
+                group: .thirdParty,
+                scope: .thirdPartyFamily,
+                modelIDs: [],
+                window: .weekly,
+                remainingFraction: thirdPartyWeekly,
+                resetAt: weeklyResetAt,
+                source: .cloudQuotaSummary,
+                fetchedAt: .now,
+                confidence: .high
             )
         ]
         return QuotaSnapshot(profileID: profileID, metrics: metrics)
@@ -35,8 +66,8 @@ struct QuotaStrategiesTests {
 
     @Test("Max Headroom picks the profile with the highest bottleneck quota")
     func testMaxHeadroom() {
-        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.85)
-        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.50, thirdParty5h: 0.40)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.85, geminiWeekly: 0.80)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.50, thirdParty5h: 0.40, geminiWeekly: 0.40)
 
         let quotas = ["p1": q1, "p2": q2]
         let threads = ["p1": 0, "p2": 0]
@@ -53,10 +84,14 @@ struct QuotaStrategiesTests {
 
     @Test("Window Harvesting picks profile resetting in <60min with >=15% quota")
     func testWindowHarvesting() {
-        // p1: 90% quota, resets in 4 hours
-        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.90, resetInMinutes: 240)
-        // p2: 30% quota, resets in 25 minutes
-        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.30, thirdParty5h: 0.30, resetInMinutes: 25)
+        // p1: 90% 5h quota, resets in 4 hours; 60% weekly
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.90,
+                              geminiWeekly: 0.60, thirdPartyWeekly: 0.60,
+                              resetInMinutes: 240)
+        // p2: 30% 5h quota, resets in 25 minutes (harvest!); 60% weekly
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.30, thirdParty5h: 0.30,
+                              geminiWeekly: 0.60, thirdPartyWeekly: 0.60,
+                              resetInMinutes: 25)
 
         let quotas = ["p1": q1, "p2": q2]
         let threads = ["p1": 0, "p2": 0]
@@ -74,9 +109,9 @@ struct QuotaStrategiesTests {
     @Test("Model-Adaptive selects Claude-healthy profile when Claude is requested")
     func testModelAdaptive() {
         // p1: 95% Gemini, but 10% Claude
-        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.10)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.10, geminiWeekly: 0.95, thirdPartyWeekly: 0.10)
         // p2: 60% Gemini, but 80% Claude
-        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.60, thirdParty5h: 0.80)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.60, thirdParty5h: 0.80, geminiWeekly: 0.60, thirdPartyWeekly: 0.80)
 
         let quotas = ["p1": q1, "p2": q2]
         let threads = ["p1": 0, "p2": 0]
@@ -103,8 +138,8 @@ struct QuotaStrategiesTests {
     @Test("Concurrency penalty penalizes active thread competition")
     func testConcurrencyPenalty() {
         // Both profiles have 90% quota, but p1 has 1 active thread and p2 has 0
-        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.90)
-        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.90, thirdParty5h: 0.90)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.90, geminiWeekly: 0.90)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.90, thirdParty5h: 0.90, geminiWeekly: 0.90)
 
         let quotas = ["p1": q1, "p2": q2]
         let threads = ["p1": 1, "p2": 0]
@@ -123,7 +158,7 @@ struct QuotaStrategiesTests {
     @Test("Model-specific depletion checks accurately segregate Gemini from Claude")
     func testModelSpecificDepletion() {
         // Snapshot with 95% Gemini but 0% Claude
-        let snap = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.0)
+        let snap = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.0, geminiWeekly: 0.95, thirdPartyWeekly: 0.0)
 
         #expect(!snap.isDepleted(for: "gemini-3.8-flash-high"))
         #expect(!snap.isDepleted(for: "gemini-2.5-pro"))
@@ -134,9 +169,9 @@ struct QuotaStrategiesTests {
     @Test("Gemini request selects account with high Gemini quota even if Claude is depleted")
     func testGeminiSelectionWhenClaudeDepleted() {
         // p1: 95% Gemini, 0% Claude (like real-world mitnick162)
-        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.0)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.0, geminiWeekly: 0.95, thirdPartyWeekly: 0.0)
         // p2: 20% Gemini, 50% Claude
-        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.20, thirdParty5h: 0.50)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.20, thirdParty5h: 0.50, geminiWeekly: 0.20, thirdPartyWeekly: 0.50)
 
         let quotas = ["p1": q1, "p2": q2]
         let threads = ["p1": 0, "p2": 0]
@@ -151,5 +186,54 @@ struct QuotaStrategiesTests {
 
         #expect(best?.profileName == "p1")
         #expect((best?.quotaRemaining ?? 0) >= 0.90)
+    }
+
+    @Test("Weekly urgency dominates 5-hour urgency in smart strategy")
+    func testWeeklyUrgencyDominates5h() {
+        // p1: high 5h quota resetting soon (25min), but high weekly quota resetting in 5 days
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.40, thirdParty5h: 0.40,
+                              geminiWeekly: 0.90, thirdPartyWeekly: 0.90,
+                              resetInMinutes: 25, weeklyResetInHours: 120)
+        // p2: medium 5h quota resetting in 4 hours, but weekly quota resetting in 12 hours (urgent!)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.70, thirdParty5h: 0.70,
+                              geminiWeekly: 0.50, thirdPartyWeekly: 0.50,
+                              resetInMinutes: 240, weeklyResetInHours: 12)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        // p2 should win because its weekly window is about to reset (12h) giving it up to 30 urgency pts
+        // even though p1 has a 5h window resetting sooner (25m)
+        #expect(best?.profileName == "p2")
+    }
+
+    @Test("Weekly near-depletion triggers hard penalty disqualifying the profile")
+    func testWeeklyNearDepletionHardPenalty() {
+        // p1: 95% 5h but only 8% weekly (near-depleted weekly = catastrophic)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.95,
+                              geminiWeekly: 0.08, thirdPartyWeekly: 0.08)
+        // p2: 50% 5h and 50% weekly (healthy)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.50, thirdParty5h: 0.50,
+                              geminiWeekly: 0.50, thirdPartyWeekly: 0.50)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        // p2 should win despite lower 5h — p1's weekly is near-depleted
+        #expect(best?.profileName == "p2")
     }
 }
