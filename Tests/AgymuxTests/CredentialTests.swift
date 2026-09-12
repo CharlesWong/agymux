@@ -43,4 +43,15 @@ struct CredentialTests {
         let d3 = Data(("go-keyring-base64:" + Data(json3.utf8).base64EncodedString()).utf8)
         #expect(!AgyCredential.representsSameAccount(d1, d3))
     }
+
+    @Test("Sanitizes credential leakage in error messages")
+    func testSanitizeCredentialLeak() {
+        let leakMessage = "security: unknown command \"676f2d6b657972696e672d6261736536343a6447567a64413d3d\""
+        let sanitized = KeychainClient.sanitizeCredentialLeak(leakMessage)
+        #expect(sanitized == "security: unknown command \"[REDACTED_HEX]\"")
+        #expect(!sanitized.contains("676f2d6b657972696e67"))
+
+        let shortError = "security: unknown command \"foo\""
+        #expect(KeychainClient.sanitizeCredentialLeak(shortError) == shortError)
+    }
 }

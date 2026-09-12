@@ -88,6 +88,68 @@ public final class KeychainClient: Sendable {
         Darwin.close(descriptor)
     }
 
+    /// Sanitizes any sensitive credential fragments or hex payloads from error messages.
+    public static func sanitizeCredentialLeak(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "[0-9a-fA-F]{16,}", options: []) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "[REDACTED_HEX]")
+    }
+
+    /// Update live Keychain item directly via /usr/bin/security and sync ~/.aisw/config.json
+    public func directActivateProfile(_ profileName: String) throws {
+        guard let stored = readStoredCredential(profileName: profileName) else {
+            throw KeychainError.activationFailed("Profile \(profileName) has no stored credential")
+        }
+
+        let hex = stored.map { String(format: "%02x", $0) }.joined()
+
+        let process = Process()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "add-generic-password",
+            "-U",
+            "-s", "gemini",
+            "-a", "antigravity",
+            "-X", hex
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw KeychainError.activationFailed("Failed to execute security: \(error.localizedDescription)")
+        }
+
+        guard process.terminationStatus == 0 else {
+            let errData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errMsg = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            let sanitized = Self.sanitizeCredentialLeak(errMsg)
+            throw KeychainError.activationFailed(sanitized.isEmpty ? "Direct Keychain update failed with code \(process.terminationStatus)" : sanitized)
+        }
+
+        // Sync ~/.aisw/config.json active profile
+        syncAiswActiveProfile(profileName)
+    }
+
+    public func syncAiswActiveProfile(_ profileName: String) {
+        let configURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".aisw/config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        var active = (json["active"] as? [String: Any]) ?? [:]
+        active["antigravity"] = profileName
+        json["active"] = active
+        if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+            try? updatedData.write(to: configURL)
+        }
+    }
+
     /// Activate a profile using aisw and verify Keychain state.
     public func activateProfile(
         _ profileName: String,
@@ -103,31 +165,45 @@ public final class KeychainClient: Sendable {
             return
         }
 
-        // 2. Call aisw use antigravity <profileName>
-        guard let aisw = aiswPath else {
-            throw KeychainError.activationFailed("aisw binary not found in PATH")
+        var activated = false
+        var lastError: String?
+
+        // 2. Call aisw use antigravity <profileName> if available
+        if let aisw = aiswPath {
+            let process = Process()
+            let errorPipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: aisw)
+            process.arguments = [
+                "--non-interactive", "--quiet", "use", "antigravity", profileName, "--json"
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = errorPipe
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    activated = true
+                } else {
+                    let errData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errMsg = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    lastError = Self.sanitizeCredentialLeak(errMsg)
+                }
+            } catch {
+                lastError = error.localizedDescription
+            }
         }
 
-        let process = Process()
-        let errorPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: aisw)
-        process.arguments = [
-            "--non-interactive", "--quiet", "use", "antigravity", profileName, "--json"
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            throw KeychainError.activationFailed(error.localizedDescription)
-        }
-
-        guard process.terminationStatus == 0 else {
-            let errData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let errMsg = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            throw KeychainError.activationFailed(errMsg.isEmpty ? "Exit code \(process.terminationStatus)" : errMsg)
+        // Fallback: If aisw was not found, failed, or was unpatched, activate directly via /usr/bin/security
+        if !activated {
+            do {
+                try directActivateProfile(profileName)
+                activated = true
+            } catch {
+                let detail = lastError ?? error.localizedDescription
+                let sanitized = Self.sanitizeCredentialLeak(detail)
+                throw KeychainError.activationFailed(sanitized.isEmpty ? "Exit code 1" : sanitized)
+            }
         }
 
         // 3. Verify live credential matches target
