@@ -118,8 +118,18 @@ public enum QuotaStrategies {
             hardPenalty -= 500.0 * Double(threads - maxSlots + 1) // Over-capacity
         }
 
+        // 4. Fresh 100% weekly quota detection (TOP PRIORITY)
+        // When an account has 100% weekly quota, it must be used first to kick off
+        // its 7-day rolling counter so that the reset timer begins immediately.
+        let isFresh100Weekly = weeklyFraction >= 0.995 && fiveHourFraction >= 0.15
+        let freshWeeklyKickoffBonus = isFresh100Weekly ? 100.0 : 0.0
+
         var score = 0.0
         var reasonParts: [String] = []
+
+        if isFresh100Weekly {
+            reasonParts.append("New 100% weekly quota (kick off 7d counter, TOP PRIORITY)")
+        }
 
         switch strategy {
         case .smart:
@@ -131,14 +141,14 @@ public enum QuotaStrategies {
             // Weekly urgency: worth up to 30 points (dominates)
             // 5h urgency: worth up to 15 points (supplementary)
             var weeklyUrgencyScore = 0.0
-            if timeToResetWeekly < 24 * 3600 && weeklyFraction >= 0.15 {
+            if timeToResetWeekly < 24 * 3600 && weeklyFraction >= 0.15 && !isFresh100Weekly {
                 // Weekly reset within 24 hours and still usable => harvest it
                 weeklyUrgencyScore = (1.0 - (timeToResetWeekly / (24 * 3600))) * 30.0
                 reasonParts.append("Weekly resets in \(Int(timeToResetWeekly / 3600))h (+\(Int(weeklyUrgencyScore))pts)")
             }
 
             var fiveHourUrgencyScore = 0.0
-            if timeToReset5h < 3600 && fiveHourFraction >= 0.15 {
+            if timeToReset5h < 3600 && fiveHourFraction >= 0.15 && !isFresh100Weekly {
                 fiveHourUrgencyScore = (1.0 - (timeToReset5h / 3600.0)) * 15.0
                 reasonParts.append("5h resets in \(Int(timeToReset5h / 60))m (+\(Int(fiveHourUrgencyScore))pts)")
             }
@@ -146,48 +156,51 @@ public enum QuotaStrategies {
             let concurrencyPenalty = (Double(threads) / Double(max(1, maxSlots))) * 25.0
             let affinityBonus = isCurrentlyActive ? 3.0 : 0.0
 
-            score = quotaScore + weeklyHeadroomBonus + weeklyUrgencyScore + fiveHourUrgencyScore - concurrencyPenalty + affinityBonus + hardPenalty
+            score = quotaScore + weeklyHeadroomBonus + weeklyUrgencyScore + fiveHourUrgencyScore + freshWeeklyKickoffBonus - concurrencyPenalty + affinityBonus + hardPenalty
             reasonParts.append("Quota: \(Int(fiveHourFraction * 100))%/\(Int(weeklyFraction * 100))%W, Threads: \(threads)/\(maxSlots)")
 
         case .maxHeadroom:
-            // Greedy on bottleneck quota, but weekly headroom gets extra weight
-            score = (weeklyFraction * 60.0) + (fiveHourFraction * 40.0) - (Double(threads) * 40.0) + hardPenalty
+            // Greedy on bottleneck quota, but weekly headroom gets extra weight, fresh 100% weekly dominates
+            score = (weeklyFraction * 60.0) + (fiveHourFraction * 40.0) + freshWeeklyKickoffBonus - (Double(threads) * 40.0) + hardPenalty
             reasonParts.append("Headroom: 5h=\(Int(fiveHourFraction * 100))%, W=\(Int(weeklyFraction * 100))%")
 
         case .harvest:
-            // Harvest strategy: aggressively prefer profiles with expiring windows.
-            // Weekly harvest dominates 5h harvest (weekly urgency always higher).
-            var harvestBonus = 0.0
-            var hasHarvest = false
-            if timeToResetWeekly < 24 * 3600 && weeklyFraction >= 0.15 {
-                let urgency = (24 * 3600 - timeToResetWeekly) / (24 * 3600)
-                harvestBonus += (urgency * 60.0) + (weeklyFraction * 20.0)
-                hasHarvest = true
-                reasonParts.append("Weekly harvest: resets in \(Int(timeToResetWeekly / 3600))h")
-            }
-            if timeToReset5h < 3600 && fiveHourFraction >= 0.15 {
-                let urgency5h = (3600.0 - timeToReset5h) / 3600.0
-                harvestBonus += (urgency5h * 40.0) + (fiveHourFraction * 15.0)
-                hasHarvest = true
-                reasonParts.append("5h harvest: resets in \(Int(timeToReset5h / 60))m")
-            }
-            if hasHarvest {
-                // Flat harvest activation bonus ensures harvest always beats non-harvest profiles
-                score = 50.0 + harvestBonus + (weeklyFraction * 10.0) - (Double(threads) * 30.0) + hardPenalty
+            // Fresh 100% weekly quota kick-off takes TOP priority even over harvesting
+            if isFresh100Weekly {
+                score = 150.0 + (fiveHourFraction * 20.0) - (Double(threads) * 30.0) + hardPenalty
             } else {
-                // No harvest opportunity: conservative quota-weighted fallback
-                score = (weeklyFraction * 30.0) + (fiveHourFraction * 20.0) - (Double(threads) * 30.0) + hardPenalty
-                reasonParts.append("Standard: 5h=\(Int(fiveHourFraction * 100))%, W=\(Int(weeklyFraction * 100))%")
+                var harvestBonus = 0.0
+                var hasHarvest = false
+                if timeToResetWeekly < 24 * 3600 && weeklyFraction >= 0.15 {
+                    let urgency = (24 * 3600 - timeToResetWeekly) / (24 * 3600)
+                    harvestBonus += (urgency * 60.0) + (weeklyFraction * 20.0)
+                    hasHarvest = true
+                    reasonParts.append("Weekly harvest: resets in \(Int(timeToResetWeekly / 3600))h")
+                }
+                if timeToReset5h < 3600 && fiveHourFraction >= 0.15 {
+                    let urgency5h = (3600.0 - timeToReset5h) / 3600.0
+                    harvestBonus += (urgency5h * 40.0) + (fiveHourFraction * 15.0)
+                    hasHarvest = true
+                    reasonParts.append("5h harvest: resets in \(Int(timeToReset5h / 60))m")
+                }
+                if hasHarvest {
+                    // Flat harvest activation bonus ensures harvest always beats non-harvest profiles
+                    score = 50.0 + harvestBonus + (weeklyFraction * 10.0) - (Double(threads) * 30.0) + hardPenalty
+                } else {
+                    // No harvest opportunity: conservative quota-weighted fallback
+                    score = (weeklyFraction * 30.0) + (fiveHourFraction * 20.0) - (Double(threads) * 30.0) + hardPenalty
+                    reasonParts.append("Standard: 5h=\(Int(fiveHourFraction * 100))%, W=\(Int(weeklyFraction * 100))%")
+                }
             }
 
         case .balanced:
             // Balanced drain with weekly weighted heavier
-            score = (weeklyFraction * 40.0) + (fiveHourFraction * 20.0) - (Double(threads) * 50.0) + hardPenalty
+            score = (weeklyFraction * 40.0) + (fiveHourFraction * 20.0) + freshWeeklyKickoffBonus - (Double(threads) * 50.0) + hardPenalty
             reasonParts.append("Balanced: 5h=\(Int(fiveHourFraction * 100))%, W=\(Int(weeklyFraction * 100))%, \(threads) threads")
 
         case .modelAdaptive:
             // Model-specific selection, weekly dominates
-            score = (weeklyFraction * 50.0) + (fiveHourFraction * 30.0) - (Double(threads) * 30.0) + hardPenalty
+            score = (weeklyFraction * 50.0) + (fiveHourFraction * 30.0) + freshWeeklyKickoffBonus - (Double(threads) * 30.0) + hardPenalty
             if isClaudeRequested {
                 reasonParts.append("Claude: 5h=\(Int(fiveHourFraction * 100))%, W=\(Int(weeklyFraction * 100))%")
             } else {

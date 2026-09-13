@@ -187,10 +187,22 @@ struct AgymuxCLI {
                 )
 
                 if eval.isSufficient {
-                    stickySelected = sticky
-                    let quotaPercent = Int(eval.quotaRemaining * 100)
-                    let activeCount = threads[sticky, default: 0]
-                    fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Maintaining cache stickiness on \u{001B}[1m\(sticky)\u{001B}[0m (\(quotaPercent)% quota · \(activeCount)/\(config.maxActiveThreadsPerProfile) threads · Model: \(effectiveModel))\n", stderr)
+                    // Check if another candidate has a fresh 100% weekly quota needing kick-off (TOP PRIORITY)
+                    let stickySnap = quotas[sticky]
+                    let stickyHasFresh100 = stickySnap?.hasFresh100Weekly(for: effectiveModel) ?? false
+
+                    let fresh100Candidate = candidates.first { c in
+                        c != sticky && (quotas[c]?.hasFresh100Weekly(for: effectiveModel) ?? false)
+                    }
+
+                    if let freshCandidate = fresh100Candidate, !stickyHasFresh100 {
+                        fputs("\u{001B}[1;35m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': fresh 100% weekly quota on '\(freshCandidate)' (TOP PRIORITY: kick off weekly counter).\n", stderr)
+                    } else {
+                        stickySelected = sticky
+                        let quotaPercent = Int(eval.quotaRemaining * 100)
+                        let activeCount = threads[sticky, default: 0]
+                        fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Maintaining cache stickiness on \u{001B}[1m\(sticky)\u{001B}[0m (\(quotaPercent)% quota · \(activeCount)/\(config.maxActiveThreadsPerProfile) threads · Model: \(effectiveModel))\n", stderr)
+                    }
                 } else {
                     fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Breaking cache stickiness on '\(sticky)': \(eval.reason). Re-routing to best pool profile…\n", stderr)
                 }

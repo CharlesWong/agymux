@@ -236,4 +236,67 @@ struct QuotaStrategiesTests {
         // p2 should win despite lower 5h — p1's weekly is near-depleted
         #expect(best?.profileName == "p2")
     }
+
+    @Test("Fresh 100% weekly quota kick-off takes TOP priority in smart strategy")
+    func testFresh100WeeklyKickoffSmartPriority() {
+        // p1: 90% 5h, 75% weekly, resets soon (urgent)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.90,
+                              geminiWeekly: 0.75, thirdPartyWeekly: 0.75,
+                              resetInMinutes: 20, weeklyResetInHours: 10)
+        // p2: fresh 100% weekly quota (needs kick-off to start 7-day clock!), 80% 5h
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.80, thirdParty5h: 0.80,
+                              geminiWeekly: 1.0, thirdPartyWeekly: 1.0,
+                              resetInMinutes: 180, weeklyResetInHours: 168)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        // p2 must win because fresh 100% weekly quota has top priority to kick off counter
+        #expect(best?.profileName == "p2")
+        #expect(best?.rationale.contains("TOP PRIORITY") == true)
+    }
+
+    @Test("Fresh 100% weekly quota kick-off takes TOP priority in harvest strategy")
+    func testFresh100WeeklyKickoffHarvestPriority() {
+        // p1: 5h window expiring in 15 mins (strong harvest candidate)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.50, thirdParty5h: 0.50,
+                              geminiWeekly: 0.60, thirdPartyWeekly: 0.60,
+                              resetInMinutes: 15)
+        // p2: fresh 100% weekly quota
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.80, thirdParty5h: 0.80,
+                              geminiWeekly: 1.0, thirdPartyWeekly: 1.0,
+                              resetInMinutes: 240)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .harvest
+        )
+
+        #expect(best?.profileName == "p2")
+        #expect(best?.rationale.contains("TOP PRIORITY") == true)
+    }
+
+    @Test("QuotaSnapshot helper correctly identifies fresh 100% weekly quota")
+    func testHasFresh100WeeklyHelper() {
+        let freshSnap = makeSnapshot(profileID: "fresh", gemini5h: 0.90, thirdParty5h: 0.90,
+                                     geminiWeekly: 1.0, thirdPartyWeekly: 0.50)
+        #expect(freshSnap.hasFresh100Weekly(for: "gemini-3.8-flash-high"))
+        #expect(!freshSnap.hasFresh100Weekly(for: "claude-sonnet-4-6"))
+
+        let depleted5hSnap = makeSnapshot(profileID: "bad5h", gemini5h: 0.05, thirdParty5h: 0.90,
+                                          geminiWeekly: 1.0, thirdPartyWeekly: 1.0)
+        #expect(!depleted5hSnap.hasFresh100Weekly(for: "gemini-3.8-flash-high"))
+    }
 }

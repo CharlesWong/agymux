@@ -221,4 +221,33 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
             return [geminiFiveHour?.resetAt, geminiWeekly?.resetAt].compactMap { $0 }.filter { $0 > now }.min()
         }
     }
+
+    public func fiveHourFraction(for requestedModel: String? = nil) -> Double {
+        let isClaudeRequested: Bool
+        if let model = requestedModel?.lowercased() {
+            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
+        } else {
+            isClaudeRequested = false
+        }
+        return isClaudeRequested
+            ? (thirdPartyFiveHour?.clampedRemainingFraction ?? 1.0)
+            : (geminiFiveHour?.clampedRemainingFraction ?? 1.0)
+    }
+
+    public func weeklyFraction(for requestedModel: String? = nil) -> Double {
+        let isClaudeRequested: Bool
+        if let model = requestedModel?.lowercased() {
+            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
+        } else {
+            isClaudeRequested = false
+        }
+        return isClaudeRequested
+            ? (thirdPartyWeekly?.clampedRemainingFraction ?? 1.0)
+            : (geminiWeekly?.clampedRemainingFraction ?? 1.0)
+    }
+
+    /// Whether this profile has a brand new, unused 100% weekly quota ready to kick off its 7-day counter.
+    public func hasFresh100Weekly(for requestedModel: String? = nil) -> Bool {
+        weeklyFraction(for: requestedModel) >= 0.995 && fiveHourFraction(for: requestedModel) >= 0.15
+    }
 }

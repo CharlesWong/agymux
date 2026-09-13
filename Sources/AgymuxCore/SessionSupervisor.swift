@@ -19,6 +19,43 @@ public final class SessionSupervisor: Sendable {
         strategy: QuotaStrategy,
         requestedModel: String?
     ) async throws -> Int32 {
+        let isInteractive = !arguments.contains("-p") && !arguments.contains("--print")
+        if isInteractive && isatty(STDIN_FILENO) != 0 {
+            // Interactive terminal mode: activate profile, register PID, and execv directly
+            // so terminal raw mode, colors, cursor, events, and signals work natively.
+            try await keychainClient.activateProfile(initialProfile)
+
+            var detectedConvId: String?
+            for (i, arg) in arguments.enumerated() {
+                if arg == "--conversation", i + 1 < arguments.count {
+                    detectedConvId = arguments[i + 1]
+                } else if arg.hasPrefix("--conversation=") {
+                    detectedConvId = String(arg.dropFirst("--conversation=".count))
+                }
+            }
+            if detectedConvId == nil && (arguments.contains("-c") || arguments.contains("--continue")) {
+                detectedConvId = detectLatestConversationId()
+            }
+
+            try? concurrencyGuard.registerSession(
+                pid: getpid(),
+                profileName: initialProfile,
+                conversationId: detectedConvId,
+                cwd: FileManager.default.currentDirectoryPath,
+                arguments: arguments
+            )
+
+            if let convId = detectedConvId ?? detectLatestConversationId() {
+                ConversationStickinessStore.shared.recordUsage(
+                    conversationId: convId,
+                    profileName: initialProfile,
+                    model: requestedModel ?? "gemini-3.8-flash-high"
+                )
+            }
+
+            execDirect(realAgyPath: realAgyPath, arguments: arguments)
+        }
+
         var currentProfile = initialProfile
         var currentArgs = arguments
         var attempts = 0
@@ -138,6 +175,16 @@ public final class SessionSupervisor: Sendable {
         return 1
     }
 
+    private func execDirect(realAgyPath: String, arguments: [String]) -> Never {
+        let strings: [UnsafeMutablePointer<CChar>?] = ([realAgyPath] + arguments).map { strdup($0) } + [nil]
+        defer { strings.compactMap { $0 }.forEach { free($0) } }
+        strings.withUnsafeBufferPointer { buffer in
+            _ = execv(realAgyPath, UnsafeMutablePointer(mutating: buffer.baseAddress))
+        }
+        fputs("agymux: could not exec \(realAgyPath): \(String(cString: strerror(errno)))\n", stderr)
+        Darwin.exit(126)
+    }
+
     private func spawnChild(
         realAgyPath: String,
         profileName: String,
@@ -159,81 +206,43 @@ public final class SessionSupervisor: Sendable {
             }
         }
 
-        let isInteractive = !arguments.contains("-p") && !arguments.contains("--print")
+        // Non-interactive / print mode: capture stdout/stderr to detect quota messages
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
 
-        if isInteractive && isatty(STDIN_FILENO) != 0 {
-            // For interactive terminal sessions, inherit standard file descriptors directly
-            // so terminal cursor control, colors, readline, and raw mode work natively.
-            process.standardInput = FileHandle.standardInput
-            process.standardOutput = FileHandle.standardOutput
-            process.standardError = FileHandle.standardError
+        try process.run()
+        let childPid = process.processIdentifier
 
-            // Temporarily ignore SIGINT in supervisor so child process handles Ctrl+C cleanly
-            let oldSigint = signal(SIGINT, SIG_IGN)
-            defer { signal(SIGINT, oldSigint) }
-
-            try process.run()
-            let childPid = process.processIdentifier
-
-            try? concurrencyGuard.registerSession(
-                pid: childPid,
-                profileName: profileName,
-                conversationId: detectedConvId,
-                cwd: FileManager.default.currentDirectoryPath,
-                arguments: arguments
-            )
-            defer {
-                concurrencyGuard.unregisterSession(pid: childPid)
-            }
-
-            process.waitUntilExit()
-            let exitCode = process.terminationStatus
-
-            // Check if statusline hook registered a 0% remaining quota right at exit
-            let quota = try? await quotaBroker.fetchQuota(profileName: profileName)
-            let isDepleted = quota?.isDepleted(for: requestedModel) ?? false
-            let quotaExhausted = isDepleted || exitCode == 42 || exitCode == 129
-
-            return (exitCode, detectedConvId, quotaExhausted, nil)
-        } else {
-            // Non-interactive / print mode: capture stdout/stderr to detect quota messages
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            process.standardInput = FileHandle.nullDevice
-
-            try process.run()
-            let childPid = process.processIdentifier
-
-            try? concurrencyGuard.registerSession(
-                pid: childPid,
-                profileName: profileName,
-                conversationId: detectedConvId,
-                cwd: FileManager.default.currentDirectoryPath,
-                arguments: arguments
-            )
-            defer {
-                concurrencyGuard.unregisterSession(pid: childPid)
-            }
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-
-            let outputText = String(decoding: data, as: UTF8.self)
-            let hasQuotaError = outputText.contains("RESOURCE_EXHAUSTED")
-                || outputText.contains("Quota exceeded")
-                || outputText.contains("exhausted your 5-hour quota")
-                || outputText.contains("Your quota will reset in")
-                || outputText.contains("rate limit reached")
-
-            // Only forward output immediately if there was NO quota error
-            // If quota failed, the supervisor will migrate to the next profile
-            if !hasQuotaError {
-                FileHandle.standardOutput.write(data)
-            }
-
-            return (process.terminationStatus, detectedConvId, hasQuotaError, data)
+        try? concurrencyGuard.registerSession(
+            pid: childPid,
+            profileName: profileName,
+            conversationId: detectedConvId,
+            cwd: FileManager.default.currentDirectoryPath,
+            arguments: arguments
+        )
+        defer {
+            concurrencyGuard.unregisterSession(pid: childPid)
         }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        let outputText = String(decoding: data, as: UTF8.self)
+        let hasQuotaError = outputText.contains("RESOURCE_EXHAUSTED")
+            || outputText.contains("Quota exceeded")
+            || outputText.contains("exhausted your 5-hour quota")
+            || outputText.contains("Your quota will reset in")
+            || outputText.contains("rate limit reached")
+
+        // Only forward output immediately if there was NO quota error
+        // If quota failed, the supervisor will migrate to the next profile
+        if !hasQuotaError {
+            FileHandle.standardOutput.write(data)
+        }
+
+        return (process.terminationStatus, detectedConvId, hasQuotaError, data)
     }
 
     /// Detects the newest conversation ID across ~/.gemini/antigravity-cli/
