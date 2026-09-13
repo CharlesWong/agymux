@@ -137,7 +137,27 @@ When invoking `agyx` programmatically from subagents, background jobs, or CI/CD 
 - **Configuration**: `~/.agymux/pools.json`
 - **Stickiness Registry**: `~/.agymux/stickiness.json`
 - **Active Sessions**: `~/.agymux/sessions/<pid>.json`
-- **Lock File**: `~/.agymux/switch.lock`
+- **Switch Lock**: `~/Library/Application Support/AgySwitcher/switch.lock`, shared with Switchboard and `agyctl`
 - **Credential Storage**: Reuses `~/.aisw/profiles/antigravity/` and macOS Keychain (`gemini / antigravity`)
 - **Shared Workspace**: Leverages shared `~/.gemini/antigravity-cli` (conversations, brain, history)
 
+Profile activation requires Switchboard's patched `aisw-switchboard` bridge with
+the `antigravity_credential_only` capability. Install or update it with
+`../switcher/scripts/install-shim.sh`. Upstream `aisw` can restore or delete shared
+settings and conversation files, so it is never used for activation. A failed
+bridge operation stops the launch; there is no direct Keychain/config write fallback.
+An interrupted Switchboard transition must be recovered in Switchboard first.
+Both terminal and print-mode sessions start through the installed `agyctl` launcher,
+which checks the expected profile under the shared switch lock and preserves the
+original working directory and arguments, including `-c`. If another switch wins
+the race before launch, retry the command; it will not silently use that account.
+Every AGY session launched by agyx uses `--dangerously-skip-permissions` to
+auto-approve tool requests, including interactive, print, resumed, and migrated
+sessions. This launch policy does not change ordinary `agy` invocations.
+
+Switcher can launch `agyx` with its **Use agyx** checkbox. Its saved manual AGY
+profile is independent of automatic scheduling: the `agyx` handoff always uses
+its own selected profile, and activating it never updates Switchboard's manual
+preference. Switchboard labels these sessions as agyx-managed and excludes them
+from manual profile-switch restart plans. Both tools still share the physical
+Keychain credential and the existing settings/conversation directories.

@@ -8,8 +8,11 @@ public final class SessionSupervisor: Sendable {
     private let poolManager = PoolManager.shared
     private let quotaBroker = QuotaBroker.shared
     private let keychainClient = KeychainClient.shared
+    private let managedAgyLauncherPath: String
 
-    public init() {}
+    public init(managedAgyLauncherPath: String = ManagedAgyLaunch.installedLauncherPath) {
+        self.managedAgyLauncherPath = managedAgyLauncherPath
+    }
 
     /// Executes `agy` with full supervision, automatically migrating to a new profile if quota runs out.
     public func runSupervised(
@@ -21,8 +24,14 @@ public final class SessionSupervisor: Sendable {
     ) async throws -> Int32 {
         let isInteractive = !arguments.contains("-p") && !arguments.contains("--print")
         if isInteractive && isatty(STDIN_FILENO) != 0 {
-            // Interactive terminal mode: activate profile, register PID, and execv directly
-            // so terminal raw mode, colors, cursor, events, and signals work natively.
+            let launch = try ManagedAgyLaunch(
+                realAgyPath: realAgyPath,
+                profileName: initialProfile,
+                officialArguments: arguments,
+                launcherPath: managedAgyLauncherPath
+            )
+            // Interactive terminal mode: activate profile, register PID, then exec the
+            // switchboard handoff so terminal raw mode, colors, cursor, and signals work natively.
             try await keychainClient.activateProfile(initialProfile)
 
             var detectedConvId: String?
@@ -53,7 +62,7 @@ public final class SessionSupervisor: Sendable {
                 )
             }
 
-            execDirect(realAgyPath: realAgyPath, arguments: arguments)
+            execDirect(launch)
         }
 
         var currentProfile = initialProfile
@@ -66,12 +75,21 @@ public final class SessionSupervisor: Sendable {
         while attempts < maxMigrations {
             attempts += 1
 
+            // Resolve the switchboard handoff before changing credentials, so a
+            // missing launcher cannot leave the selected profile changed without a launch.
+            let launch = try ManagedAgyLaunch(
+                realAgyPath: realAgyPath,
+                profileName: currentProfile,
+                officialArguments: currentArgs,
+                launcherPath: managedAgyLauncherPath
+            )
+
             // 1. Activate selected profile in Keychain
             try await keychainClient.activateProfile(currentProfile)
 
             // 2. Launch child process
             let (exitCode, conversationId, quotaExhausted, outputData) = try await spawnChild(
-                realAgyPath: realAgyPath,
+                launch: launch,
                 profileName: currentProfile,
                 arguments: currentArgs,
                 requestedModel: requestedModel
@@ -175,25 +193,29 @@ public final class SessionSupervisor: Sendable {
         return 1
     }
 
-    private func execDirect(realAgyPath: String, arguments: [String]) -> Never {
-        let strings: [UnsafeMutablePointer<CChar>?] = ([realAgyPath] + arguments).map { strdup($0) } + [nil]
+    private func execDirect(_ launch: ManagedAgyLaunch) -> Never {
+        for (key, value) in launch.environment() {
+            _ = setenv(key, value, 1)
+        }
+        let strings: [UnsafeMutablePointer<CChar>?] = ([launch.launcherPath] + launch.arguments).map { strdup($0) } + [nil]
         defer { strings.compactMap { $0 }.forEach { free($0) } }
         strings.withUnsafeBufferPointer { buffer in
-            _ = execv(realAgyPath, UnsafeMutablePointer(mutating: buffer.baseAddress))
+            _ = execv(launch.launcherPath, UnsafeMutablePointer(mutating: buffer.baseAddress))
         }
-        fputs("agymux: could not exec \(realAgyPath): \(String(cString: strerror(errno)))\n", stderr)
+        fputs("agymux: could not exec Agy Switchboard launcher \(launch.launcherPath): \(String(cString: strerror(errno)))\n", stderr)
         Darwin.exit(126)
     }
 
     private func spawnChild(
-        realAgyPath: String,
+        launch: ManagedAgyLaunch,
         profileName: String,
         arguments: [String],
         requestedModel: String?
     ) async throws -> (exitCode: Int32, conversationId: String?, quotaExhausted: Bool, outputData: Data?) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: realAgyPath)
-        process.arguments = arguments
+        process.executableURL = URL(fileURLWithPath: launch.launcherPath)
+        process.arguments = launch.arguments
+        process.environment = launch.environment()
         process.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 
         // Capture initial conversation id if passed in arguments

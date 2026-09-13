@@ -48,6 +48,8 @@ struct AgymuxCLI {
           agyx --model <model>              Override model (e.g. gemini-3.8-flash-high, claude-sonnet-4-6)
           agyx resume                       Shortcut for 'agyx -c'
 
+        AGY sessions always run with --dangerously-skip-permissions (auto-approve tools).
+
         \u{001B}[1mSUBCOMMANDS:\u{001B}[0m
           agyx pool status                  Display live multi-account quota & concurrency dashboard
           agyx pool set <name> <category>   Set profile category (auto | reserved)

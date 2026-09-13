@@ -26,4 +26,10 @@ struct ExecutableLocatorTests {
         let found = ExecutableLocator.find("non_existent_binary_xyz_12345")
         #expect(found == nil)
     }
+
+    @Test("AISW lookup only returns the Switchboard bridge")
+    func testAiswLookupRejectsGenericExecutables() {
+        let found = ExecutableLocator.find("aisw", extraPaths: ["/bin/sh"])
+        #expect(found == nil || URL(fileURLWithPath: found!).lastPathComponent == "aisw-switchboard")
+    }
 }
