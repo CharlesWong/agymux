@@ -20,7 +20,8 @@ public final class SessionSupervisor: Sendable {
         initialProfile: String,
         arguments: [String],
         strategy: QuotaStrategy,
-        requestedModel: String?
+        requestedModel: String?,
+        entrySignalState: ExecSignalState
     ) async throws -> Int32 {
         let isInteractive = !arguments.contains("-p") && !arguments.contains("--print")
         if isInteractive && isatty(STDIN_FILENO) != 0 {
@@ -62,7 +63,7 @@ public final class SessionSupervisor: Sendable {
                 )
             }
 
-            execDirect(launch)
+            try execDirect(launch, entrySignalState: entrySignalState)
         }
 
         var currentProfile = initialProfile
@@ -187,17 +188,15 @@ public final class SessionSupervisor: Sendable {
         return 1
     }
 
-    private func execDirect(_ launch: ManagedAgyLaunch) -> Never {
-        for (key, value) in launch.environment() {
-            _ = setenv(key, value, 1)
-        }
-        let strings: [UnsafeMutablePointer<CChar>?] = ([launch.launcherPath] + launch.arguments).map { strdup($0) } + [nil]
-        defer { strings.compactMap { $0 }.forEach { free($0) } }
-        strings.withUnsafeBufferPointer { buffer in
-            _ = execv(launch.launcherPath, UnsafeMutablePointer(mutating: buffer.baseAddress))
-        }
-        fputs("agymux: could not exec Agy Switchboard launcher \(launch.launcherPath): \(String(cString: strerror(errno)))\n", stderr)
-        Darwin.exit(126)
+    private func execDirect(_ launch: ManagedAgyLaunch, entrySignalState: ExecSignalState) throws -> Never {
+        // Replacing from a Swift worker must restore the shell's signal mask
+        // atomically. Raw execv would carry blocked SIGTTIN into AGY and turn a
+        // background terminal read into EIO instead of normal job control.
+        try entrySignalState.replaceProcess(
+            executable: launch.launcherPath,
+            arguments: launch.arguments,
+            environment: launch.environment()
+        )
     }
 
     private func spawnChild(

@@ -5,6 +5,15 @@ import Foundation
 @main
 struct AgymuxCLI {
     static func main() async {
+        // Capture the shell's mask before the first suspension. Swift's worker
+        // threads block signals that an interactive child must not inherit.
+        let entrySignalState: ExecSignalState
+        do {
+            entrySignalState = try ExecSignalState.capture()
+        } catch {
+            fputs("agymux: could not capture launch signal state: \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
         let args = Array(CommandLine.arguments.dropFirst())
 
         if args.first == "pool" {
@@ -24,7 +33,7 @@ struct AgymuxCLI {
             return
         }
         if args.first == "resume" {
-            await handleRunCommand(["-c"] + Array(args.dropFirst()))
+            await handleRunCommand(["-c"] + Array(args.dropFirst()), entrySignalState: entrySignalState)
             return
         }
         if args.first == "--help" || args.first == "-h" || args.first == "help" {
@@ -33,7 +42,7 @@ struct AgymuxCLI {
         }
 
         // Default: Run agy session with auto-dispatch
-        await handleRunCommand(args)
+        await handleRunCommand(args, entrySignalState: entrySignalState)
     }
 
     static func printHelp() {
@@ -82,7 +91,7 @@ struct AgymuxCLI {
         """)
     }
 
-    static func handleRunCommand(_ rawArgs: [String]) async {
+    static func handleRunCommand(_ rawArgs: [String], entrySignalState: ExecSignalState) async {
         guard let realAgy = ExecutableLocator.find("agy") else {
             fputs("\u{001B}[1;31magymux: Official 'agy' executable not found in PATH.\u{001B}[0m\n", stderr)
             exit(1)
@@ -275,7 +284,8 @@ struct AgymuxCLI {
                 initialProfile: targetProfile,
                 arguments: forwardedArgs,
                 strategy: activeStrategy,
-                requestedModel: effectiveModel
+                requestedModel: effectiveModel,
+                entrySignalState: entrySignalState
             )
 
             // Record conversation stickiness for future continuations

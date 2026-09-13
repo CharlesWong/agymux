@@ -155,6 +155,14 @@ Every AGY session launched by agyx uses `--dangerously-skip-permissions` to
 auto-approve tool requests, including interactive, print, resumed, and migrated
 sessions. This launch policy does not change ordinary `agy` invocations.
 
+Interactive launches preserve the shell's signal mask across Swift's asynchronous
+dispatcher. On macOS, the final process replacement restores that captured mask
+atomically while keeping the same PID, terminal, and process group. This prevents
+Swift worker threads' blocked job-control signals from leaking into AGY and
+causing `read /dev/stdin: input/output error` when terminal foreground ownership
+changes. Normal shell suspension/resumption and intentionally ignored signals
+remain intact.
+
 Switcher can launch `agyx` with its **Use agyx** checkbox. Its saved manual AGY
 profile is independent of automatic scheduling: the `agyx` handoff always uses
 its own selected profile, and activating it never updates Switchboard's manual
