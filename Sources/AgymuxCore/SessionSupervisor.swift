@@ -177,14 +177,8 @@ public final class SessionSupervisor: Sendable {
                     profileName: best.profileName,
                     model: requestedModel ?? "gemini-3.8-flash-high"
                 )
-                var newArgs = currentArgs.filter {
-                    $0 != "-c" && $0 != "--continue" && !$0.hasPrefix("--conversation")
-                }
-                newArgs.insert(contentsOf: ["--conversation", convId], at: 0)
-                currentArgs = newArgs
-            } else if !currentArgs.contains("-c") && !currentArgs.contains("--continue") {
-                currentArgs.insert("-c", at: 0)
             }
+            currentArgs = Self.rewriteArgumentsForResume(arguments: currentArgs, conversationId: resolvedConversationId)
         }
 
         if let lastData = lastFailedOutput {
@@ -270,5 +264,38 @@ public final class SessionSupervisor: Sendable {
     /// Detects the newest conversation ID across ~/.gemini/antigravity-cli/
     private func detectLatestConversationId() -> String? {
         ConversationStickinessStore.shared.detectLatestConversationId()
+    }
+
+    /// Rewrites arguments for session resumption/migration cleanly without dangling or duplicated options.
+    public static func rewriteArgumentsForResume(arguments: [String], conversationId: String?) -> [String] {
+        guard let convId = conversationId else {
+            if !arguments.contains("-c") && !arguments.contains("--continue") {
+                return ["-c"] + arguments
+            }
+            return arguments
+        }
+
+        var newArgs: [String] = []
+        var skipNext = false
+        for (index, arg) in arguments.enumerated() {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if arg == "-c" || arg == "--continue" {
+                continue
+            }
+            if arg == "--conversation" {
+                if index + 1 < arguments.endIndex {
+                    skipNext = true
+                }
+                continue
+            }
+            if arg.hasPrefix("--conversation=") {
+                continue
+            }
+            newArgs.append(arg)
+        }
+        return ["--conversation", convId] + newArgs
     }
 }
