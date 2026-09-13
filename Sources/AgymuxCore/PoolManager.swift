@@ -84,7 +84,7 @@ public final class PoolManager: Sendable {
         if lower == "claude sonnet 4.6" || lower == "claude-sonnet-4-6" {
             return "claude-sonnet-4-6"
         }
-        if lower == "claude opus 4.6" || lower == "claude-opus-4-6-thinking" {
+        if lower == "claude opus 4.6" || lower == "claude-opus-4-6-thinking" || lower.contains("claude opus 4.6") {
             return "claude-opus-4-6-thinking"
         }
         return trimmed.replacingOccurrences(of: " ", with: "-")

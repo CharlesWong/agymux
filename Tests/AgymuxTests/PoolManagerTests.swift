@@ -102,5 +102,8 @@ struct PoolManagerTests {
 
         manager.setModel("gemini 3.8 flash high")
         #expect(manager.loadConfig().defaultModel == "gemini-3.8-flash-high")
+
+        manager.setModel("Claude Opus 4.6 (Thinking)")
+        #expect(manager.loadConfig().defaultModel == "claude-opus-4-6-thinking")
     }
 }

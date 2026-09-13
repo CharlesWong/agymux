@@ -77,6 +77,7 @@ public final class ConcurrencyGuard: Sendable {
             let binaryName = URL(fileURLWithPath: path).lastPathComponent.lowercased()
 
             let isAgyProcess = binaryName == "agy"
+                || binaryName == "agyctl"
                 || binaryName.contains("agymux")
                 || binaryName.hasPrefix("agy.")
                 || binaryName.contains("test")
