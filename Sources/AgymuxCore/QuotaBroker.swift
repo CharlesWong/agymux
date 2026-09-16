@@ -83,7 +83,7 @@ public final class QuotaBroker: Sendable {
                 }
             }
 
-            let hosts = ["cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
+            let hosts = ["daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"]
             var lastError: Error?
 
             for host in hosts {
@@ -189,7 +189,7 @@ public final class QuotaBroker: Sendable {
         }
     }
 
-    private func loadSnapshotCache(profileName: String, maxAge: TimeInterval = 900) -> QuotaSnapshot? {
+    private func loadSnapshotCache(profileName: String, maxAge: TimeInterval = 120) -> QuotaSnapshot? {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
