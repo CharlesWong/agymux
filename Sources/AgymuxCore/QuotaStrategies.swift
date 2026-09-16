@@ -72,14 +72,25 @@ public enum QuotaStrategies {
         strategy: QuotaStrategy,
         now: Date
     ) -> ScoredProfile {
+        guard let snapshot = snapshot else {
+            return ScoredProfile(
+                profileName: profileName,
+                score: -99_999.0,
+                quotaRemaining: 0.0,
+                activeThreads: threads,
+                maxSlots: maxSlots,
+                rationale: "No quota snapshot available (unreachable or rate-limited)"
+            )
+        }
+
         // 1. Determine model family target
         let isClaudeRequested = QuotaSnapshot.isThirdPartyModel(requestedModel)
 
         // 2. Extract per-window quota fractions
-        let g5 = snapshot?.geminiFiveHour?.clampedRemainingFraction ?? 1.0
-        let gw = snapshot?.geminiWeekly?.clampedRemainingFraction ?? 1.0
-        let t5 = snapshot?.thirdPartyFiveHour?.clampedRemainingFraction ?? 1.0
-        let tw = snapshot?.thirdPartyWeekly?.clampedRemainingFraction ?? 1.0
+        let g5 = snapshot.geminiFiveHour?.clampedRemainingFraction ?? 0.0
+        let gw = snapshot.geminiWeekly?.clampedRemainingFraction ?? 0.0
+        let t5 = snapshot.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0
+        let tw = snapshot.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0
 
         let fiveHourFraction: Double
         let weeklyFraction: Double
@@ -89,13 +100,13 @@ public enum QuotaStrategies {
         if isClaudeRequested {
             fiveHourFraction = t5
             weeklyFraction = tw
-            fiveHourResetDate = snapshot?.thirdPartyFiveHour?.resetAt
-            weeklyResetDate = snapshot?.thirdPartyWeekly?.resetAt
+            fiveHourResetDate = snapshot.thirdPartyFiveHour?.resetAt
+            weeklyResetDate = snapshot.thirdPartyWeekly?.resetAt
         } else {
             fiveHourFraction = g5
             weeklyFraction = gw
-            fiveHourResetDate = snapshot?.geminiFiveHour?.resetAt
-            weeklyResetDate = snapshot?.geminiWeekly?.resetAt
+            fiveHourResetDate = snapshot.geminiFiveHour?.resetAt
+            weeklyResetDate = snapshot.geminiWeekly?.resetAt
         }
 
         // The bottleneck is always the lower of the two windows

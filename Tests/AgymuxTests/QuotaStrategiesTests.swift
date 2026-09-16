@@ -505,4 +505,42 @@ struct QuotaStrategiesTests {
         // p1 MUST win because p2 is at critical near-depletion (<12%) and will crash immediately
         #expect(best?.profileName == "p1")
     }
+
+    @Test("Missing quota snapshot strictly disqualifies candidate with score -99_999 and isEligible false")
+    func testMissingSnapshotDisqualifiesCandidate() {
+        let quotas: [String: QuotaSnapshot] = [:]
+        let threads = ["p1": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        let candidate = try! #require(best)
+        #expect(!candidate.isEligible)
+        #expect(candidate.score == -99_999.0)
+        #expect(candidate.quotaRemaining == 0.0)
+    }
+
+    @Test("Candidate with missing snapshot is never chosen over candidate with known quota")
+    func testMissingSnapshotYieldsToHealthyCandidate() {
+        // p1 has known quota (even with 1 active thread)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.35, thirdParty5h: 0.35, geminiWeekly: 0.50, thirdPartyWeekly: 0.50)
+        // p2 has NO quota data (e.g. timed out, rate-limited, unreachable) but 0 threads
+        let quotas: [String: QuotaSnapshot] = ["p1": q1]
+        let threads = ["p1": 1, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+
+        #expect(best?.profileName == "p1")
+        #expect(best?.isEligible == true)
+    }
 }

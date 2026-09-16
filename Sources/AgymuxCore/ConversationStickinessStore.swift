@@ -107,23 +107,28 @@ public final class ConversationStickinessStore: Sendable {
         threshold: Double = 0.15,
         now: Date = .now
     ) -> (isSufficient: Bool, quotaRemaining: Double, reason: String) {
+        // 0. Snapshot presence check
+        guard let snapshot = snapshot else {
+            return (false, 0.0, "No quota snapshot available for profile '\(profileName)'")
+        }
+
         // 1. Thread capacity check
         if activeThreads >= maxSlots {
             return (false, 0.0, "Profile is at concurrency capacity (\(activeThreads)/\(maxSlots) threads)")
         }
 
         // 2. Depletion check
-        if snapshot?.isDepleted(for: requestedModel, at: now) == true {
+        if snapshot.isDepleted(for: requestedModel, at: now) {
             return (false, 0.0, "Profile quota is depleted")
         }
 
         // 3. Bottleneck quota fraction check
         let isClaudeRequested = QuotaSnapshot.isThirdPartyModel(requestedModel)
 
-        let g5 = snapshot?.geminiFiveHour?.clampedRemainingFraction ?? 1.0
-        let gw = snapshot?.geminiWeekly?.clampedRemainingFraction ?? 1.0
-        let t5 = snapshot?.thirdPartyFiveHour?.clampedRemainingFraction ?? 1.0
-        let tw = snapshot?.thirdPartyWeekly?.clampedRemainingFraction ?? 1.0
+        let g5 = snapshot.geminiFiveHour?.clampedRemainingFraction ?? 0.0
+        let gw = snapshot.geminiWeekly?.clampedRemainingFraction ?? 0.0
+        let t5 = snapshot.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0
+        let tw = snapshot.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0
 
         let bottleneckQuota = isClaudeRequested ? min(t5, tw) : min(g5, gw)
 
@@ -137,14 +142,52 @@ public final class ConversationStickinessStore: Sendable {
         return (true, bottleneckQuota, "Sufficient headroom (\(pct)% quota) for cache reuse")
     }
 
-    /// Detects the newest conversation ID across ~/.gemini/antigravity-cli/conversations/ and brain/
-    public func detectLatestConversationId() -> String? {
+    /// Detects the newest conversation ID across ~/.gemini/antigravity-cli, prioritizing conversations belonging to the given workspace.
+    public func detectLatestConversationId(forWorkspace workspacePath: String? = nil) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let baseDir = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
 
+        let targetDir = workspacePath ?? FileManager.default.currentDirectoryPath
+        let normalizedTarget = URL(fileURLWithPath: targetDir).resolvingSymlinksInPath().path
+
+        // 1. Query conversation_summaries.db for workspace-scoped conversations
+        let dbURL = baseDir.appendingPathComponent("conversation_summaries.db")
+        if FileManager.default.fileExists(atPath: dbURL.path),
+           let convId = queryLatestWorkspaceConversation(dbPath: dbURL.path, workspacePath: normalizedTarget) {
+            return convId
+        }
+
+        // 2. Check active sessions in ~/.agymux/sessions/ for matching cwd
+        let sessionDir = home.appendingPathComponent(".agymux/sessions", isDirectory: true)
+        if let sessionFiles = try? FileManager.default.contentsOfDirectory(
+            at: sessionDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            struct SessionInfo: Decodable {
+                let cwd: String?
+                let conversationId: String?
+            }
+            var matchingSessions: [(String, Date)] = []
+            for file in sessionFiles where file.pathExtension == "json" {
+                if let data = try? Data(contentsOf: file),
+                   let info = try? JSONDecoder().decode(SessionInfo.self, from: data),
+                   let conv = info.conversationId, !conv.isEmpty,
+                   let cwd = info.cwd, !cwd.isEmpty,
+                   URL(fileURLWithPath: cwd).resolvingSymlinksInPath().path == normalizedTarget,
+                   let vals = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
+                   let date = vals.contentModificationDate {
+                    matchingSessions.append((conv, date))
+                }
+            }
+            if let latestSession = matchingSessions.sorted(by: { $0.1 > $1.1 }).first {
+                return latestSession.0
+            }
+        }
+
+        // 3. Fallback to newest conversation globally across brain/ and conversations/
         var candidateURLs: [(URL, Date)] = []
 
-        // Check brain/
         let brainDir = baseDir.appendingPathComponent("brain", isDirectory: true)
         if let dirs = try? FileManager.default.contentsOfDirectory(
             at: brainDir,
@@ -159,7 +202,6 @@ public final class ConversationStickinessStore: Sendable {
             }
         }
 
-        // Check conversations/*.db
         let convDir = baseDir.appendingPathComponent("conversations", isDirectory: true)
         if let files = try? FileManager.default.contentsOfDirectory(
             at: convDir,
@@ -176,5 +218,24 @@ public final class ConversationStickinessStore: Sendable {
 
         let sorted = candidateURLs.sorted { $0.1 > $1.1 }
         return sorted.first?.0.lastPathComponent
+    }
+
+    private func queryLatestWorkspaceConversation(dbPath: String, workspacePath: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        let escapedPath = workspacePath.replacingOccurrences(of: "'", with: "''")
+        process.arguments = [
+            dbPath,
+            "SELECT conversation_id FROM conversation_summaries WHERE workspace_uris LIKE '%\(escapedPath)%' ORDER BY last_modified_time DESC LIMIT 1;"
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let result = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? nil : result
     }
 }

@@ -125,4 +125,20 @@ struct ConversationStickinessTests {
 
         #expect(eval.isSufficient == false)
     }
+
+    @Test("Stickiness breaks when snapshot is nil")
+    func testStickinessBreaksWhenSnapshotIsNil() {
+        let store = ConversationStickinessStore()
+        let eval = store.evaluateStickiness(
+            profileName: "unknown",
+            snapshot: nil,
+            activeThreads: 0,
+            maxSlots: 3,
+            requestedModel: "gemini-3.8-flash-high",
+            threshold: 0.15
+        )
+
+        #expect(eval.isSufficient == false)
+        #expect(eval.quotaRemaining == 0.0)
+    }
 }

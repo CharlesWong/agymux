@@ -10,15 +10,29 @@ public final class QuotaBroker: Sendable {
         return ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].joined(separator: "-")
     }
     private let statusLineDirectory: URL
+    private let agymuxCacheDirectory: URL
+    private let agySwitcherProfilesDirectory: URL
+    private let tokenCacheURL: URL
 
-    public init(statusLineDirectory: URL? = nil) {
+    public init(
+        statusLineDirectory: URL? = nil,
+        agymuxCacheDirectory: URL? = nil,
+        agySwitcherProfilesDirectory: URL? = nil,
+        tokenCacheURL: URL? = nil
+    ) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
         self.statusLineDirectory = statusLineDirectory
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Caches/AgySwitcher/quota/statusline", isDirectory: true)
+            ?? home.appendingPathComponent("Library/Caches/AgySwitcher/quota/statusline", isDirectory: true)
+        self.agymuxCacheDirectory = agymuxCacheDirectory
+            ?? home.appendingPathComponent(".agymux/cache/quota", isDirectory: true)
+        self.agySwitcherProfilesDirectory = agySwitcherProfilesDirectory
+            ?? home.appendingPathComponent("Library/Caches/AgySwitcher/quota/profiles", isDirectory: true)
+        self.tokenCacheURL = tokenCacheURL
+            ?? home.appendingPathComponent(".agymux/token_cache.json")
     }
 
     /// Fetch quota for a single profile.
-    public func fetchQuota(profileName: String, timeout: TimeInterval = 6) async throws -> QuotaSnapshot {
+    public func fetchQuota(profileName: String, timeout: TimeInterval = 8) async throws -> QuotaSnapshot {
         // 1. Try statusline hook if very fresh (< 45s)
         if let status = newestStatusLine(profileName: profileName),
            status.receivedAt.timeIntervalSinceNow > -45 {
@@ -27,12 +41,12 @@ public final class QuotaBroker: Sendable {
             }
         }
 
-        // 2. Fetch directly from Google Cloud Quota API
+        // 2. Fetch directly from Google Cloud Quota API (with automatic fallback to recent disk cache)
         return try await fetchCloudQuota(profileName: profileName, timeout: timeout)
     }
 
     /// Refresh quotas for all profiles concurrently.
-    public func fetchAllQuotas(profileNames: [String], timeout: TimeInterval = 6) async -> [String: QuotaSnapshot] {
+    public func fetchAllQuotas(profileNames: [String], timeout: TimeInterval = 8) async -> [String: QuotaSnapshot] {
         await withTaskGroup(of: (String, QuotaSnapshot?).self) { group in
             for name in profileNames {
                 group.addTask {
@@ -51,61 +65,149 @@ public final class QuotaBroker: Sendable {
     }
 
     private func fetchCloudQuota(profileName: String, timeout: TimeInterval) async throws -> QuotaSnapshot {
-        let rawSecret = try loadProfileSecret(profileName: profileName)
-        let tokenData = try decodeOAuthToken(from: rawSecret)
-        var accessToken = tokenData.accessToken
+        do {
+            let rawSecret = try loadProfileSecret(profileName: profileName)
+            let tokenData = try decodeOAuthToken(from: rawSecret)
+            var accessToken: String
 
-        let isExpired = tokenData.expiryDate.map { $0.timeIntervalSinceNow < 60 } ?? true
-        if isExpired, let refreshToken = tokenData.refreshToken {
-            if let fresh = try? await refreshAccessToken(refreshToken: refreshToken) {
-                accessToken = fresh
-            }
-        }
-
-        let hosts = ["cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
-        var lastError: Error?
-
-        for host in hosts {
-            do {
-                guard let url = URL(string: "https://\(host)/v1internal:retrieveUserQuotaSummary") else { continue }
-                var request = URLRequest(url: url, timeoutInterval: timeout)
-                request.httpMethod = "POST"
-                request.httpBody = Data("{}".utf8)
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-                request.setValue("antigravity/1.15.0 darwin/arm64", forHTTPHeaderField: "User-Agent")
-
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else { continue }
-
-                if http.statusCode == 401, let refreshToken = tokenData.refreshToken {
+            if let cached = loadCachedToken(for: profileName) {
+                accessToken = cached
+            } else {
+                let isExpired = tokenData.expiryDate.map { $0.timeIntervalSinceNow < 60 } ?? true
+                if isExpired, let refreshToken = tokenData.refreshToken {
                     let fresh = try await refreshAccessToken(refreshToken: refreshToken)
                     accessToken = fresh
-                    var retry = request
-                    retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
-                    let (retryData, retryResponse) = try await URLSession.shared.data(for: retry)
-                    guard let retryHttp = retryResponse as? HTTPURLResponse, retryHttp.statusCode == 200 else { continue }
-                    return try QuotaParsers.cloudQuotaSummary(
-                        data: retryData,
+                    saveCachedToken(for: profileName, accessToken: fresh, expiry: Date.now.addingTimeInterval(3300))
+                } else {
+                    accessToken = tokenData.accessToken
+                }
+            }
+
+            let hosts = ["cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
+            var lastError: Error?
+
+            for host in hosts {
+                do {
+                    guard let url = URL(string: "https://\(host)/v1internal:retrieveUserQuotaSummary") else { continue }
+                    var request = URLRequest(url: url, timeoutInterval: timeout)
+                    request.httpMethod = "POST"
+                    request.httpBody = Data("{}".utf8)
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+                    request.setValue("antigravity/1.15.0 darwin/arm64", forHTTPHeaderField: "User-Agent")
+
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    guard let http = response as? HTTPURLResponse else { continue }
+
+                    if http.statusCode == 401, let refreshToken = tokenData.refreshToken {
+                        let fresh = try await refreshAccessToken(refreshToken: refreshToken)
+                        accessToken = fresh
+                        saveCachedToken(for: profileName, accessToken: fresh, expiry: Date.now.addingTimeInterval(3300))
+                        var retry = request
+                        retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
+                        let (retryData, retryResponse) = try await URLSession.shared.data(for: retry)
+                        guard let retryHttp = retryResponse as? HTTPURLResponse, retryHttp.statusCode == 200 else { continue }
+                        let snap = try QuotaParsers.cloudQuotaSummary(
+                            data: retryData,
+                            profileID: profileName,
+                            account: nil,
+                            tier: nil
+                        )
+                        saveSnapshotCache(snapshot: snap, profileName: profileName)
+                        return snap
+                    }
+
+                    guard http.statusCode == 200 else {
+                        if http.statusCode == 429 {
+                            lastError = QuotaParseError.noQuotaData("Profile \(profileName) rate-limited (HTTP 429)")
+                        }
+                        continue
+                    }
+                    let snap = try QuotaParsers.cloudQuotaSummary(
+                        data: data,
                         profileID: profileName,
                         account: nil,
                         tier: nil
                     )
+                    saveSnapshotCache(snapshot: snap, profileName: profileName)
+                    return snap
+                } catch {
+                    lastError = error
                 }
+            }
 
-                guard http.statusCode == 200 else { continue }
-                return try QuotaParsers.cloudQuotaSummary(
-                    data: data,
-                    profileID: profileName,
-                    account: nil,
-                    tier: nil
-                )
-            } catch {
-                lastError = error
+            throw lastError ?? QuotaParseError.noQuotaData("Cloud quota service unreachable for profile \(profileName)")
+        } catch {
+            // Check fallback snapshot cache if live cloud quota failed or timed out
+            if let cached = loadSnapshotCache(profileName: profileName) {
+                return cached
+            }
+            throw error
+        }
+    }
+
+    private struct CachedTokenRecord: Codable {
+        let accessToken: String
+        let expiry: Date
+    }
+
+    private func loadCachedToken(for profileName: String) -> String? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: tokenCacheURL),
+              let dict = try? decoder.decode([String: CachedTokenRecord].self, from: data),
+              let record = dict[profileName],
+              record.expiry.timeIntervalSinceNow > 120
+        else { return nil }
+        return record.accessToken
+    }
+
+    private func saveCachedToken(for profileName: String, accessToken: String, expiry: Date) {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var dict: [String: CachedTokenRecord] = [:]
+        if let data = try? Data(contentsOf: tokenCacheURL),
+           let existing = try? decoder.decode([String: CachedTokenRecord].self, from: data) {
+            dict = existing
+        }
+        dict[profileName] = CachedTokenRecord(accessToken: accessToken, expiry: expiry)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(dict) {
+            try? FileManager.default.createDirectory(at: tokenCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: tokenCacheURL, options: [.atomic])
+        }
+    }
+
+    private func saveSnapshotCache(snapshot: QuotaSnapshot, profileName: String) {
+        try? FileManager.default.createDirectory(at: agymuxCacheDirectory, withIntermediateDirectories: true)
+        let file = agymuxCacheDirectory.appendingPathComponent("\(profileName).json")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(snapshot) {
+            try? data.write(to: file, options: [.atomic])
+        }
+    }
+
+    private func loadSnapshotCache(profileName: String, maxAge: TimeInterval = 900) -> QuotaSnapshot? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let candidateURLs = [
+            agymuxCacheDirectory.appendingPathComponent("\(profileName).json"),
+            agySwitcherProfilesDirectory.appendingPathComponent("\(profileName).json")
+        ]
+
+        for url in candidateURLs {
+            guard let data = try? Data(contentsOf: url),
+                  var snap = try? decoder.decode(QuotaSnapshot.self, from: data)
+            else { continue }
+            if abs(snap.fetchedAt.timeIntervalSinceNow) <= maxAge {
+                snap.isCached = true
+                return snap
             }
         }
-
-        throw lastError ?? QuotaParseError.noQuotaData("Cloud quota service unreachable for profile \(profileName)")
+        return nil
     }
 
     private func loadProfileSecret(profileName: String) throws -> Data {

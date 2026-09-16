@@ -111,10 +111,12 @@ public struct QuotaMetric: Codable, Hashable, Identifiable, Sendable {
     }
 
     public func isDepleted(at now: Date = .now) -> Bool {
-        guard let fraction = clampedRemainingFraction else { return false }
-        if fraction > 0.005 { return false }
-        if let resetAt, resetAt <= now { return false }
-        return true
+        guard let fraction = clampedRemainingFraction else { return true }
+        if fraction <= 0.05 {
+            if let resetAt, resetAt <= now { return false }
+            return true
+        }
+        return false
     }
 }
 
@@ -169,12 +171,12 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
 
     public var primaryFiveHour: QuotaMetric? {
         let candidates = [geminiFiveHour, thirdPartyFiveHour].compactMap { $0 }
-        return candidates.min { ($0.clampedRemainingFraction ?? 1.0) < ($1.clampedRemainingFraction ?? 1.0) }
+        return candidates.min { ($0.clampedRemainingFraction ?? 0.0) < ($1.clampedRemainingFraction ?? 0.0) }
     }
 
     public var primaryWeekly: QuotaMetric? {
         let candidates = [geminiWeekly, thirdPartyWeekly].compactMap { $0 }
-        return candidates.min { ($0.clampedRemainingFraction ?? 1.0) < ($1.clampedRemainingFraction ?? 1.0) }
+        return candidates.min { ($0.clampedRemainingFraction ?? 0.0) < ($1.clampedRemainingFraction ?? 0.0) }
     }
 
     public static func isThirdPartyModel(_ model: String?) -> Bool {
@@ -185,13 +187,12 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     public func isDepleted(for requestedModel: String? = nil, at now: Date = .now) -> Bool {
         let isClaudeRequested = Self.isThirdPartyModel(requestedModel)
         if isClaudeRequested {
-            if let t5 = thirdPartyFiveHour, t5.isDepleted(at: now) { return true }
-            if let tw = thirdPartyWeekly, tw.isDepleted(at: now) { return true }
+            guard let t5 = thirdPartyFiveHour, let tw = thirdPartyWeekly else { return true }
+            return t5.isDepleted(at: now) || tw.isDepleted(at: now)
         } else {
-            if let g5 = geminiFiveHour, g5.isDepleted(at: now) { return true }
-            if let gw = geminiWeekly, gw.isDepleted(at: now) { return true }
+            guard let g5 = geminiFiveHour, let gw = geminiWeekly else { return true }
+            return g5.isDepleted(at: now) || gw.isDepleted(at: now)
         }
-        return false
     }
 
     public func weeklyResetDate(for requestedModel: String? = nil) -> Date? {
@@ -232,18 +233,24 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
 
     public func fiveHourFraction(for requestedModel: String? = nil) -> Double {
         Self.isThirdPartyModel(requestedModel)
-            ? (thirdPartyFiveHour?.clampedRemainingFraction ?? 1.0)
-            : (geminiFiveHour?.clampedRemainingFraction ?? 1.0)
+            ? (thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0)
+            : (geminiFiveHour?.clampedRemainingFraction ?? 0.0)
     }
 
     public func weeklyFraction(for requestedModel: String? = nil) -> Double {
         Self.isThirdPartyModel(requestedModel)
-            ? (thirdPartyWeekly?.clampedRemainingFraction ?? 1.0)
-            : (geminiWeekly?.clampedRemainingFraction ?? 1.0)
+            ? (thirdPartyWeekly?.clampedRemainingFraction ?? 0.0)
+            : (geminiWeekly?.clampedRemainingFraction ?? 0.0)
     }
 
     /// Whether this profile has a brand new, unused 100% weekly quota ready to kick off its 7-day counter.
     public func hasFresh100Weekly(for requestedModel: String? = nil) -> Bool {
-        weeklyFraction(for: requestedModel) >= 0.995 && fiveHourFraction(for: requestedModel) >= 0.15
+        let wMetric = Self.isThirdPartyModel(requestedModel) ? thirdPartyWeekly : geminiWeekly
+        let fMetric = Self.isThirdPartyModel(requestedModel) ? thirdPartyFiveHour : geminiFiveHour
+        guard let wf = wMetric?.clampedRemainingFraction,
+              let ff = fMetric?.clampedRemainingFraction else {
+            return false
+        }
+        return wf >= 0.995 && ff >= 0.15
     }
 }

@@ -43,7 +43,15 @@ public enum QuotaParsers {
                 let bucketId = string(bucket["bucketId"]) ?? ""
                 let windowRaw = string(bucket["window"]) ?? bucketId
                 let window = QuotaWindowKind(normalizing: windowRaw)
-                let remaining = number(bucket["remainingFraction"] ?? bucket["remaining_fraction"])
+                let isDisabled = (bucket["disabled"] as? Bool) ?? false
+                let description = string(bucket["description"])?.lowercased() ?? ""
+                let isExhaustedByDesc = description.contains("hit your weekly limit")
+                    || description.contains("limit does not currently apply")
+
+                var remaining = number(bucket["remainingFraction"] ?? bucket["remaining_fraction"])
+                if isDisabled || isExhaustedByDesc {
+                    remaining = 0.0
+                }
                 let resetAt = date(bucket["resetTime"] ?? bucket["reset_time"])
                 guard remaining != nil || resetAt != nil else { continue }
                 metrics.append(
@@ -62,13 +70,41 @@ public enum QuotaParsers {
             }
         }
 
-        guard !metrics.isEmpty else { throw QuotaParseError.noQuotaData(nil) }
+        // Enforce group-level cascading exhaustion: if weekly quota is depleted (<= 0.5%),
+        // any 5-hour limit in that same family is completely disabled and unusable.
+        var resolvedMetrics: [QuotaMetric] = []
+        let grouped = Dictionary(grouping: metrics, by: { $0.group })
+        for (_, groupMetrics) in grouped {
+            let weekly = groupMetrics.first(where: { $0.window == .weekly })
+            let weeklyDepleted = (weekly?.clampedRemainingFraction ?? 1.0) <= 0.005
+            for m in groupMetrics {
+                if weeklyDepleted && m.window == .fiveHour && (m.remainingFraction ?? 0.0) > 0.0 {
+                    resolvedMetrics.append(
+                        QuotaMetric(
+                            group: m.group,
+                            scope: m.scope,
+                            modelIDs: m.modelIDs,
+                            window: m.window,
+                            remainingFraction: 0.0,
+                            resetAt: m.resetAt,
+                            source: m.source,
+                            fetchedAt: m.fetchedAt,
+                            confidence: m.confidence
+                        )
+                    )
+                } else {
+                    resolvedMetrics.append(m)
+                }
+            }
+        }
+
+        guard !resolvedMetrics.isEmpty else { throw QuotaParseError.noQuotaData(nil) }
         return QuotaSnapshot(
             profileID: profileID,
             account: account,
             tier: tier,
             fetchedAt: fetchedAt,
-            metrics: metrics,
+            metrics: resolvedMetrics,
             warnings: [],
             isCached: false
         )

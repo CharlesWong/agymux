@@ -161,7 +161,7 @@ struct AgymuxCLI {
             }
         }
 
-        let targetConvId = explicitConvId ?? (isContinuation ? stickinessStore.detectLatestConversationId() : nil)
+        let targetConvId = explicitConvId ?? (isContinuation ? stickinessStore.detectLatestConversationId(forWorkspace: FileManager.default.currentDirectoryPath) : nil)
 
         let targetProfile: String
         let activeStrategy = strategyOverride ?? QuotaStrategy(rawValue: config.defaultStrategy) ?? .smart
@@ -191,7 +191,7 @@ struct AgymuxCLI {
             // Select candidate and atomically register session under the lock to prevent concurrent dogpiling
             var candidateBestRationale: String?
             var candidateBestThreads = 0
-            var candidateBestQuota = 1.0
+            var candidateBestQuota = 0.0
 
             let chosen: String = concurrencyGuard.withLock {
                 concurrencyGuard.pruneStaleSessions()
@@ -215,7 +215,7 @@ struct AgymuxCLI {
                     if eval.isSufficient {
                         let stickySnap = quotas[sticky]
                         let stickyHasFresh100 = stickySnap?.hasFresh100Weekly(for: effectiveModel) ?? false
-                        let sticky5h = stickySnap?.fiveHourFraction(for: effectiveModel) ?? 1.0
+                        let sticky5h = stickySnap?.fiveHourFraction(for: effectiveModel) ?? 0.0
 
                         // Check if another candidate has a fresh 100% weekly quota needing kick-off (TOP PRIORITY)
                         let fresh100Candidate = candidates.first { c in
@@ -251,7 +251,7 @@ struct AgymuxCLI {
                         arguments: forwardedArgs
                     )
                     candidateBestThreads = threads[sticky, default: 0]
-                    candidateBestQuota = quotas[sticky]?.fiveHourFraction(for: effectiveModel) ?? 1.0
+                    candidateBestQuota = quotas[sticky]?.fiveHourFraction(for: effectiveModel) ?? 0.0
                     return sticky
                 }
 
@@ -362,7 +362,7 @@ struct AgymuxCLI {
             concurrencyGuard.unregisterSession(pid: Darwin.getpid())
 
             // Record conversation stickiness for future continuations
-            if let activeId = targetConvId ?? stickinessStore.detectLatestConversationId() {
+            if let activeId = targetConvId ?? stickinessStore.detectLatestConversationId(forWorkspace: FileManager.default.currentDirectoryPath) {
                 stickinessStore.recordUsage(
                     conversationId: activeId,
                     profileName: targetProfile,
@@ -454,16 +454,18 @@ struct AgymuxCLI {
                 let maxSlots = config.maxActiveThreadsPerProfile
                 let slotStr = "\(inUse) / \(maxSlots)"
 
-                let geminiAvailable = (snap?.geminiFiveHour?.clampedRemainingFraction ?? 1.0) > 0.05
-                    && (snap?.geminiWeekly?.clampedRemainingFraction ?? 1.0) > 0.05
-                let thirdPartyAvailable = (snap?.thirdPartyFiveHour?.clampedRemainingFraction ?? 1.0) > 0.05
-                    && (snap?.thirdPartyWeekly?.clampedRemainingFraction ?? 1.0) > 0.05
+                let geminiAvailable = (snap?.geminiFiveHour?.clampedRemainingFraction ?? 0.0) > 0.05
+                    && (snap?.geminiWeekly?.clampedRemainingFraction ?? 0.0) > 0.05
+                let thirdPartyAvailable = (snap?.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0) > 0.05
+                    && (snap?.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0) > 0.05
 
                 let status: String
                 if config.reserved.contains(p) {
                     status = "\u{001B}[1;34mMANUAL ONLY\u{001B}[0m"
                 } else if inUse >= maxSlots {
                     status = "\u{001B}[1;33mBUSY\u{001B}[0m"
+                } else if snap == nil {
+                    status = "\u{001B}[1;31mUNREACHABLE\u{001B}[0m"
                 } else if geminiAvailable && thirdPartyAvailable {
                     status = "\u{001B}[1;32mREADY\u{001B}[0m"
                 } else if geminiAvailable && !thirdPartyAvailable {
