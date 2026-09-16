@@ -21,12 +21,12 @@ public struct StickinessRecord: Codable, Sendable {
 
 public struct StickinessConfiguration: Codable, Sendable {
     public var version: Int
-    public var minStickinessQuota: Double // Default 0.15 (15%)
+    public var minStickinessQuota: Double // Default 0.25 (25%)
     public var records: [String: StickinessRecord]
 
     public init(
         version: Int = 1,
-        minStickinessQuota: Double = 0.15,
+        minStickinessQuota: Double = 0.25,
         records: [String: StickinessRecord] = [:]
     ) {
         self.version = version
@@ -53,8 +53,11 @@ public final class ConversationStickinessStore: Sendable {
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let config = try? decoder.decode(StickinessConfiguration.self, from: data) else {
+        guard var config = try? decoder.decode(StickinessConfiguration.self, from: data) else {
             return StickinessConfiguration()
+        }
+        if config.minStickinessQuota < 0.20 && config.version == 1 {
+            config.minStickinessQuota = 0.25
         }
         return config
     }

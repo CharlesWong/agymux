@@ -213,16 +213,24 @@ struct AgymuxCLI {
                     )
 
                     if eval.isSufficient {
-                        // Check if another candidate has a fresh 100% weekly quota needing kick-off (TOP PRIORITY)
                         let stickySnap = quotas[sticky]
                         let stickyHasFresh100 = stickySnap?.hasFresh100Weekly(for: effectiveModel) ?? false
+                        let sticky5h = stickySnap?.fiveHourFraction(for: effectiveModel) ?? 1.0
 
+                        // Check if another candidate has a fresh 100% weekly quota needing kick-off (TOP PRIORITY)
                         let fresh100Candidate = candidates.first { c in
                             c != sticky && (quotas[c]?.hasFresh100Weekly(for: effectiveModel) ?? false)
                         }
 
+                        // Also check if sticky profile has low 5h fuel (< 25%) while another candidate is completely idle & healthy (>= 50%)
+                        let healthyIdleCandidate = candidates.first { c in
+                            c != sticky && threads[c, default: 0] == 0 && (quotas[c]?.fiveHourFraction(for: effectiveModel) ?? 0) >= 0.50
+                        }
+
                         if let freshCandidate = fresh100Candidate, !stickyHasFresh100 {
                             fputs("\u{001B}[1;35m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': fresh 100% weekly quota on '\(freshCandidate)' (TOP PRIORITY: kick off weekly counter).\n", stderr)
+                        } else if sticky5h < 0.25, let healthy = healthyIdleCandidate {
+                            fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': 5h quota is low (\(Int(sticky5h * 100))%), switching to healthy idle profile '\(healthy)' to avoid quota wall.\n", stderr)
                         } else {
                             stickySelected = sticky
                             let quotaPercent = Int(eval.quotaRemaining * 100)

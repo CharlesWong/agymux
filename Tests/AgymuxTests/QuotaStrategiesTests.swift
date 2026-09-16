@@ -431,4 +431,78 @@ struct QuotaStrategiesTests {
         #expect(bestP4?.isEligible == true)
         #expect(bestP4?.profileName == "p4")
     }
+
+    @Test("Idle healthy profile is strongly preferred over idle profile whose 5h quota is almost empty")
+    func testIdleHealthyPreferredOverIdleLow5h() {
+        // p1: 10% 5h quota (almost empty, dangerous!), but 40% weekly with reset in 12h
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.10, thirdParty5h: 0.10,
+                              geminiWeekly: 0.40, thirdPartyWeekly: 0.40,
+                              resetInMinutes: 240, weeklyResetInHours: 12)
+        // p2: 85% 5h quota (healthy!), 40% weekly with reset in 4 days
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.85, thirdParty5h: 0.85,
+                              geminiWeekly: 0.40, thirdPartyWeekly: 0.40,
+                              resetInMinutes: 240, weeklyResetInHours: 96)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        // p2 MUST win because p1's 5h fuel is near-depleted and cannot run new sessions safely
+        #expect(best?.profileName == "p2")
+    }
+
+    @Test("Low 5h profile is NOT harvested even if weekly reset is in 2 hours")
+    func testLow5hProfileNotHarvestedWhen5hDepleted() {
+        // p1: 8% 5h quota (critically low), weekly 25% resetting in 2h
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.08, thirdParty5h: 0.08,
+                              geminiWeekly: 0.25, thirdPartyWeekly: 0.25,
+                              resetInMinutes: 240, weeklyResetInHours: 2)
+        // p2: 70% 5h quota (healthy), weekly 40% resetting in 5 days
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.70, thirdParty5h: 0.70,
+                              geminiWeekly: 0.40, thirdPartyWeekly: 0.40,
+                              resetInMinutes: 240, weeklyResetInHours: 120)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        // p2 MUST win because p1 does not have enough 5h gas to execute queries
+        #expect(best?.profileName == "p2")
+    }
+
+    @Test("Healthy profile with 1 thread beats critical near-depleted (5%) 0-thread profile")
+    func testHealthy1ThreadBeatsNearDepleted0Thread() {
+        // p1: 95% quota, 1 thread
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.95,
+                              geminiWeekly: 0.95, thirdPartyWeekly: 0.95)
+        // p2: 5% 5h quota (critical near-depleted), 0 threads
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.05, thirdParty5h: 0.05,
+                              geminiWeekly: 0.30, thirdPartyWeekly: 0.30)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 1, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+
+        // p1 MUST win because p2 is at critical near-depletion (<12%) and will crash immediately
+        #expect(best?.profileName == "p1")
+    }
 }
