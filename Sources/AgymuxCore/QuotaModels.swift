@@ -195,31 +195,52 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         return false
     }
 
-    public func primaryResetDate(for requestedModel: String? = nil, at now: Date = .now) -> Date? {
+    public func weeklyResetDate(for requestedModel: String? = nil) -> Date? {
         let isClaudeRequested: Bool
         if let model = requestedModel?.lowercased() {
             isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
         } else {
             isClaudeRequested = false
         }
+        return isClaudeRequested ? thirdPartyWeekly?.resetAt : geminiWeekly?.resetAt
+    }
 
-        if isClaudeRequested {
-            if let t5 = thirdPartyFiveHour, (t5.clampedRemainingFraction ?? 1.0) <= 0.20 {
-                if let reset = t5.resetAt, reset > now { return reset }
-            }
-            if let tw = thirdPartyWeekly, (tw.clampedRemainingFraction ?? 1.0) <= 0.15 {
-                if let reset = tw.resetAt, reset > now { return reset }
-            }
-            return [thirdPartyFiveHour?.resetAt, thirdPartyWeekly?.resetAt].compactMap { $0 }.filter { $0 > now }.min()
+    public func fiveHourResetDate(for requestedModel: String? = nil) -> Date? {
+        let isClaudeRequested: Bool
+        if let model = requestedModel?.lowercased() {
+            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
         } else {
-            if let g5 = geminiFiveHour, (g5.clampedRemainingFraction ?? 1.0) <= 0.20 {
-                if let reset = g5.resetAt, reset > now { return reset }
-            }
-            if let gw = geminiWeekly, (gw.clampedRemainingFraction ?? 1.0) <= 0.15 {
-                if let reset = gw.resetAt, reset > now { return reset }
-            }
-            return [geminiFiveHour?.resetAt, geminiWeekly?.resetAt].compactMap { $0 }.filter { $0 > now }.min()
+            isClaudeRequested = false
         }
+        return isClaudeRequested ? thirdPartyFiveHour?.resetAt : geminiFiveHour?.resetAt
+    }
+
+    public func primaryResetDate(for requestedModel: String? = nil, at now: Date = .now) -> Date? {
+        let w = weeklyResetDate(for: requestedModel)
+        let f = fiveHourResetDate(for: requestedModel)
+        let wf = weeklyFraction(for: requestedModel)
+        let ff = fiveHourFraction(for: requestedModel)
+
+        // 1. If weekly quota is near-depleted (<= 15%), weekly reset is the life-saver
+        if wf <= 0.15, let wReset = w, wReset > now {
+            return wReset
+        }
+        // 2. If weekly reset is within 48 hours and has usable quota, it's urgent to harvest
+        if let wReset = w, wReset > now && wReset.timeIntervalSince(now) <= 48 * 3600 {
+            return wReset
+        }
+        // 3. If 5h quota is depleted (<= 5%), show when 5h quota will revive
+        if ff <= 0.05, let fReset = f, fReset > now {
+            return fReset
+        }
+        // 4. Default to weekly reset if available, otherwise 5h reset
+        if let wReset = w, wReset > now {
+            return wReset
+        }
+        if let fReset = f, fReset > now {
+            return fReset
+        }
+        return nil
     }
 
     public func fiveHourFraction(for requestedModel: String? = nil) -> Double {

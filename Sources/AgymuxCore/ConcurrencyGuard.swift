@@ -30,12 +30,30 @@ public final class ConcurrencyGuard: Sendable {
     public static let shared = ConcurrencyGuard()
 
     private let sessionsDirectory: URL
+    private let lockURL: URL
 
     public init(sessionsDirectory: URL? = nil) {
         let dir = sessionsDirectory ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".agymux/sessions", isDirectory: true)
         self.sessionsDirectory = dir
+        self.lockURL = dir.deletingLastPathComponent().appendingPathComponent("sessions.lock")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    }
+
+    /// Execute a block under the exclusive session lock to serialize concurrency checks and reservations.
+    public func withLock<T>(_ block: () throws -> T) rethrows -> T {
+        let descriptor = lockURL.path.withCString {
+            Darwin.open($0, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        }
+        guard descriptor >= 0 else {
+            return try block()
+        }
+        flock(descriptor, LOCK_EX)
+        defer {
+            flock(descriptor, LOCK_UN)
+            Darwin.close(descriptor)
+        }
+        return try block()
     }
 
     /// Prune dead PID records from the sessions directory.

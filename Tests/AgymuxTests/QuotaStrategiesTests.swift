@@ -299,4 +299,80 @@ struct QuotaStrategiesTests {
                                           geminiWeekly: 1.0, thirdPartyWeekly: 1.0)
         #expect(!depleted5hSnap.hasFresh100Weekly(for: "gemini-3.8-flash-high"))
     }
+
+    @Test("Process-balanced tiering prefers idle profile with 0 threads over 1 thread even if idle profile has lower quota")
+    func testProcessBalancedTieringPreferZeroThreads() {
+        // p1: 95% quota, but has 1 active thread
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.95, thirdParty5h: 0.95,
+                              geminiWeekly: 0.95, thirdPartyWeekly: 0.95)
+        // p2: 60% quota, but has 0 active threads (completely idle)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.60, thirdParty5h: 0.60,
+                              geminiWeekly: 0.60, thirdPartyWeekly: 0.60)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 1, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+
+        // p2 MUST win because process-balanced load distribution prevents dogpiling onto p1
+        #expect(best?.profileName == "p2")
+        #expect(best?.activeThreads == 0)
+    }
+
+    @Test("Weekly expiry urgency prioritizes profile resetting in 2 hours with 25% weekly quota over 5-day reset")
+    func testWeeklyExpiryHarvestUrgency() {
+        // p1: 60% weekly quota resetting in 5 days (120h)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.90, thirdParty5h: 0.90,
+                              geminiWeekly: 0.60, thirdPartyWeekly: 0.60,
+                              resetInMinutes: 240, weeklyResetInHours: 120)
+        // p2: 25% weekly quota resetting in 2 hours (urgent harvest before wipeout!)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.80, thirdParty5h: 0.80,
+                              geminiWeekly: 0.25, thirdPartyWeekly: 0.25,
+                              resetInMinutes: 240, weeklyResetInHours: 2)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        // p2 MUST win because its weekly window resets in 2 hours with 25% quota remaining
+        #expect(best?.profileName == "p2")
+        #expect(best?.rationale.contains("Weekly resets in") == true)
+        #expect(best?.rationale.contains("25% W left") == true)
+    }
+
+    @Test("Distant weekly reset conserves low quota profile")
+    func testDistantWeeklyLockoutConservation() {
+        // p1: 15% weekly quota resetting in 5 days (120h) - low quota with distant reset
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.80, thirdParty5h: 0.80,
+                              geminiWeekly: 0.15, thirdPartyWeekly: 0.15,
+                              resetInMinutes: 240, weeklyResetInHours: 120)
+        // p2: 35% weekly quota resetting in 5 days (120h)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.80, thirdParty5h: 0.80,
+                              geminiWeekly: 0.35, thirdPartyWeekly: 0.35,
+                              resetInMinutes: 240, weeklyResetInHours: 120)
+
+        let quotas = ["p1": q1, "p2": q2]
+        let threads = ["p1": 0, "p2": 0]
+
+        let best = QuotaStrategies.selectBestProfile(
+            candidates: ["p1", "p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            strategy: .smart
+        )
+
+        #expect(best?.profileName == "p2")
+    }
 }

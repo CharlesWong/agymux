@@ -180,49 +180,67 @@ struct AgymuxCLI {
 
             fputs("\u{001B}[1;30m[agymux] Checking quotas for \(candidates.count) pool profiles…\u{001B}[0m\r", stderr)
             let quotas = await quotaBroker.fetchAllQuotas(profileNames: candidates)
-            let threads = concurrencyGuard.allActiveThreadCounts()
 
-            var stickySelected: String?
+            // Select candidate and atomically register session under the lock to prevent concurrent dogpiling
+            var candidateBestRationale: String?
+            var candidateBestThreads = 0
+            var candidateBestQuota = 1.0
 
-            // Evaluate Continuation Stickiness for maximum prompt cache hit rate
-            if isContinuation, let convId = targetConvId,
-               let sticky = stickinessStore.stickyProfile(for: convId),
-               candidates.contains(sticky) {
-                let eval = stickinessStore.evaluateStickiness(
-                    profileName: sticky,
-                    snapshot: quotas[sticky],
-                    activeThreads: threads[sticky, default: 0],
-                    maxSlots: config.maxActiveThreadsPerProfile,
-                    requestedModel: effectiveModel,
-                    threshold: stickinessStore.loadConfig().minStickinessQuota
-                )
+            let chosen: String = concurrencyGuard.withLock {
+                concurrencyGuard.pruneStaleSessions()
+                let threads = concurrencyGuard.allActiveThreadCounts()
 
-                if eval.isSufficient {
-                    // Check if another candidate has a fresh 100% weekly quota needing kick-off (TOP PRIORITY)
-                    let stickySnap = quotas[sticky]
-                    let stickyHasFresh100 = stickySnap?.hasFresh100Weekly(for: effectiveModel) ?? false
+                var stickySelected: String?
 
-                    let fresh100Candidate = candidates.first { c in
-                        c != sticky && (quotas[c]?.hasFresh100Weekly(for: effectiveModel) ?? false)
-                    }
+                // Evaluate Continuation Stickiness for maximum prompt cache hit rate
+                if isContinuation, let convId = targetConvId,
+                   let sticky = stickinessStore.stickyProfile(for: convId),
+                   candidates.contains(sticky) {
+                    let eval = stickinessStore.evaluateStickiness(
+                        profileName: sticky,
+                        snapshot: quotas[sticky],
+                        activeThreads: threads[sticky, default: 0],
+                        maxSlots: config.maxActiveThreadsPerProfile,
+                        requestedModel: effectiveModel,
+                        threshold: stickinessStore.loadConfig().minStickinessQuota
+                    )
 
-                    if let freshCandidate = fresh100Candidate, !stickyHasFresh100 {
-                        fputs("\u{001B}[1;35m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': fresh 100% weekly quota on '\(freshCandidate)' (TOP PRIORITY: kick off weekly counter).\n", stderr)
+                    if eval.isSufficient {
+                        // Check if another candidate has a fresh 100% weekly quota needing kick-off (TOP PRIORITY)
+                        let stickySnap = quotas[sticky]
+                        let stickyHasFresh100 = stickySnap?.hasFresh100Weekly(for: effectiveModel) ?? false
+
+                        let fresh100Candidate = candidates.first { c in
+                            c != sticky && (quotas[c]?.hasFresh100Weekly(for: effectiveModel) ?? false)
+                        }
+
+                        if let freshCandidate = fresh100Candidate, !stickyHasFresh100 {
+                            fputs("\u{001B}[1;35m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': fresh 100% weekly quota on '\(freshCandidate)' (TOP PRIORITY: kick off weekly counter).\n", stderr)
+                        } else {
+                            stickySelected = sticky
+                            let quotaPercent = Int(eval.quotaRemaining * 100)
+                            let activeCount = threads[sticky, default: 0]
+                            fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Maintaining cache stickiness on \u{001B}[1m\(sticky)\u{001B}[0m (\(quotaPercent)% quota · \(activeCount)/\(config.maxActiveThreadsPerProfile) threads · Model: \(effectiveModel))\n", stderr)
+                        }
                     } else {
-                        stickySelected = sticky
-                        let quotaPercent = Int(eval.quotaRemaining * 100)
-                        let activeCount = threads[sticky, default: 0]
-                        fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Maintaining cache stickiness on \u{001B}[1m\(sticky)\u{001B}[0m (\(quotaPercent)% quota · \(activeCount)/\(config.maxActiveThreadsPerProfile) threads · Model: \(effectiveModel))\n", stderr)
+                        fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Breaking cache stickiness on '\(sticky)': \(eval.reason). Re-routing to best pool profile…\n", stderr)
                     }
-                } else {
-                    fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Breaking cache stickiness on '\(sticky)': \(eval.reason). Re-routing to best pool profile…\n", stderr)
                 }
-            }
 
-            if let sticky = stickySelected {
-                targetProfile = sticky
-            } else {
-                var candidateBest = QuotaStrategies.selectBestProfile(
+                if let sticky = stickySelected {
+                    try? concurrencyGuard.registerSession(
+                        pid: getpid(),
+                        profileName: sticky,
+                        conversationId: targetConvId,
+                        cwd: FileManager.default.currentDirectoryPath,
+                        arguments: forwardedArgs
+                    )
+                    candidateBestThreads = threads[sticky, default: 0]
+                    candidateBestQuota = quotas[sticky]?.fiveHourFraction(for: effectiveModel) ?? 1.0
+                    return sticky
+                }
+
+                let candidateBest = QuotaStrategies.selectBestProfile(
                     candidates: candidates,
                     quotas: quotas,
                     activeThreads: threads,
@@ -231,49 +249,86 @@ struct AgymuxCLI {
                     strategy: activeStrategy
                 )
 
-                // Handle when all auto profiles are depleted
-                if candidateBest == nil || (candidateBest?.quotaRemaining ?? 0.0) < 0.05 {
-                    let fallbackMode = config.reservedFallbackMode.lowercased()
-                    let reservedCandidates = config.reserved
-
-                    if !reservedCandidates.isEmpty {
-                        let resQuotas = await quotaBroker.fetchAllQuotas(profileNames: reservedCandidates)
-                        let bestReserved = QuotaStrategies.selectBestProfile(
-                            candidates: reservedCandidates,
-                            quotas: resQuotas,
-                            activeThreads: threads,
-                            maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
-                            requestedModel: effectiveModel,
-                            strategy: activeStrategy
-                        )
-
-                        if let br = bestReserved, br.quotaRemaining >= 0.05 {
-                            if fallbackMode == "auto" {
-                                fputs("\u{001B}[1;33m[agymux] Auto Pool depleted; auto-fallback to reserved profile '\(br.profileName)'.\u{001B}[0m\n", stderr)
-                                candidateBest = br
-                            } else if fallbackMode == "prompt" && isatty(STDIN_FILENO) != 0 {
-                                let emailLabel = poolManager.email(for: br.profileName).map { " (\($0))" } ?? ""
-                                fputs("\n\u{001B}[1;33m[agymux] All Auto Pool profiles are depleted.\u{001B}[0m\n", stderr)
-                                fputs("\u{001B}[1;36m[agymux] Unlock reserved profile '\(br.profileName)'\(emailLabel)? [y/N]: \u{001B}[0m", stderr)
-                                fflush(stderr)
-
-                                if let line = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-                                   line == "y" || line == "yes" {
-                                    candidateBest = br
-                                }
-                            }
-                        }
-                    }
+                if let best = candidateBest, best.quotaRemaining >= 0.05 {
+                    try? concurrencyGuard.registerSession(
+                        pid: getpid(),
+                        profileName: best.profileName,
+                        conversationId: targetConvId,
+                        cwd: FileManager.default.currentDirectoryPath,
+                        arguments: forwardedArgs
+                    )
+                    candidateBestRationale = best.rationale
+                    candidateBestThreads = best.activeThreads
+                    candidateBestQuota = best.quotaRemaining
+                    return best.profileName
                 }
 
-                guard let best = candidateBest, best.quotaRemaining >= 0.05 else {
+                return ""
+            }
+
+            if chosen.isEmpty {
+                // Auto pool depleted - check configurable fallback to reserved pool
+                let fallbackMode = config.reservedFallbackMode.lowercased()
+                let reservedCandidates = config.reserved
+
+                if !reservedCandidates.isEmpty {
+                    let resQuotas = await quotaBroker.fetchAllQuotas(profileNames: reservedCandidates)
+                    let threads = concurrencyGuard.allActiveThreadCounts()
+                    let bestReserved = QuotaStrategies.selectBestProfile(
+                        candidates: reservedCandidates,
+                        quotas: resQuotas,
+                        activeThreads: threads,
+                        maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
+                        requestedModel: effectiveModel,
+                        strategy: activeStrategy
+                    )
+
+                    if let br = bestReserved, br.quotaRemaining >= 0.05 {
+                        var proceedWithReserved = false
+                        if fallbackMode == "auto" {
+                            fputs("\u{001B}[1;33m[agymux] Auto Pool depleted; auto-fallback to reserved profile '\(br.profileName)'.\u{001B}[0m\n", stderr)
+                            proceedWithReserved = true
+                        } else if fallbackMode == "prompt" && isatty(STDIN_FILENO) != 0 {
+                            let emailLabel = poolManager.email(for: br.profileName).map { " (\($0))" } ?? ""
+                            fputs("\n\u{001B}[1;33m[agymux] All Auto Pool profiles are depleted.\u{001B}[0m\n", stderr)
+                            fputs("\u{001B}[1;36m[agymux] Unlock reserved profile '\(br.profileName)'\(emailLabel)? [y/N]: \u{001B}[0m", stderr)
+                            fflush(stderr)
+
+                            if let line = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                               line == "y" || line == "yes" {
+                                proceedWithReserved = true
+                            }
+                        }
+
+                        if proceedWithReserved {
+                            targetProfile = br.profileName
+                            candidateBestRationale = br.rationale
+                            candidateBestThreads = br.activeThreads
+                            candidateBestQuota = br.quotaRemaining
+                            try? concurrencyGuard.registerSession(
+                                pid: getpid(),
+                                profileName: br.profileName,
+                                conversationId: targetConvId,
+                                cwd: FileManager.default.currentDirectoryPath,
+                                arguments: forwardedArgs
+                            )
+                        } else {
+                            fputs("\u{001B}[1;31magymux: All profiles are depleted.\u{001B}[0m\n", stderr)
+                            exit(1)
+                        }
+                    } else {
+                        fputs("\u{001B}[1;31magymux: All profiles are depleted.\u{001B}[0m\n", stderr)
+                        exit(1)
+                    }
+                } else {
                     fputs("\u{001B}[1;31magymux: Could not select an available profile with remaining quota.\u{001B}[0m\n", stderr)
                     exit(1)
                 }
-
-                targetProfile = best.profileName
-                let quotaPercent = Int(best.quotaRemaining * 100)
-                fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Dispatched to \u{001B}[1m\(targetProfile)\u{001B}[0m (\(quotaPercent)% quota · \(best.activeThreads) active threads · Model: \(effectiveModel) · \(best.rationale))\n", stderr)
+            } else {
+                targetProfile = chosen
+                let quotaPercent = Int(candidateBestQuota * 100)
+                let rationaleStr = candidateBestRationale.map { " · \($0)" } ?? ""
+                fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Dispatched to \u{001B}[1m\(targetProfile)\u{001B}[0m (\(quotaPercent)% quota · \(candidateBestThreads) active threads · Model: \(effectiveModel)\(rationaleStr))\n", stderr)
             }
         }
 
@@ -313,15 +368,41 @@ struct AgymuxCLI {
             let quotas = await QuotaBroker.shared.fetchAllQuotas(profileNames: allProfiles)
             let threads = ConcurrencyGuard.shared.allActiveThreadCounts()
 
+            func visibleWidth(_ str: String) -> Int {
+                str.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression).count
+            }
+
             func pad(_ s: String, _ width: Int) -> String {
-                if s.count >= width { return String(s.prefix(width)) }
-                return s + String(repeating: " ", count: width - s.count)
+                let vis = visibleWidth(s)
+                if vis > width {
+                    if s.contains("\u{001B}") {
+                        return s
+                    }
+                    return String(s.prefix(width - 1)) + "…"
+                }
+                return s + String(repeating: " ", count: width - vis)
+            }
+
+            func formatCompactDuration(_ seconds: TimeInterval?) -> String {
+                guard let s = seconds, s > 0 else { return "--" }
+                let totalMinutes = Int(s) / 60
+                let hours = totalMinutes / 60
+                let minutes = totalMinutes % 60
+                if hours >= 24 {
+                    let days = hours / 24
+                    let remHours = hours % 24
+                    return "\(days)d \(remHours)h"
+                } else if hours > 0 {
+                    return "\(hours)h \(minutes)m"
+                } else {
+                    return "\(minutes)m"
+                }
             }
 
             print("\u{001B}[1mAGY PROFILE POOL STATUS\u{001B}[0m (Model: \(config.defaultModel), Strategy: \(config.defaultStrategy), Slots: \(config.maxActiveThreadsPerProfile), Fallback: \(config.reservedFallbackMode))")
-            print(String(repeating: "─", count: 108))
-            print("\(pad("POOL", 11)) \(pad("PROFILE (EMAIL)", 32)) \(pad("GEMINI (5h/W)", 15)) \(pad("CLAUDE (5h/W)", 15)) \(pad("RESET IN", 12)) \(pad("SLOTS", 9)) STATUS")
-            print(String(repeating: "─", count: 108))
+            print(String(repeating: "─", count: 123))
+            print("\(pad("POOL", 11)) \(pad("PROFILE (EMAIL)", 35)) \(pad("GEMINI (5h/W)", 15)) \(pad("CLAUDE (5h/W)", 15)) \(pad("RESET (W/5h)", 20)) \(pad("SLOTS", 9)) STATUS")
+            print(String(repeating: "─", count: 123))
 
             for p in allProfiles {
                 let cat = config.reserved.contains(p) ? "[reserved]" : "[auto]"
@@ -337,15 +418,18 @@ struct AgymuxCLI {
                 let tw = snap?.thirdPartyWeekly?.clampedRemainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
                 let claudeStr = "\(t5) / \(tw)"
 
-                let resetStr: String
-                if let reset = snap?.primaryResetDate() {
-                    let diff = max(0, reset.timeIntervalSinceNow)
-                    let h = Int(diff) / 3600
-                    let m = (Int(diff) % 3600) / 60
-                    resetStr = "\(h)h \(m)m"
+                let wDiff = snap?.weeklyResetDate(for: config.defaultModel).map { max(0, $0.timeIntervalSinceNow) }
+                let fDiff = snap?.fiveHourResetDate(for: config.defaultModel).map { max(0, $0.timeIntervalSinceNow) }
+                let wRaw = formatCompactDuration(wDiff)
+                let fRaw = formatCompactDuration(fDiff)
+
+                let wDisplay: String
+                if let w = wDiff, w < 48 * 3600 && (snap?.weeklyFraction(for: config.defaultModel) ?? 0) >= 0.10 {
+                    wDisplay = "\u{001B}[1;33m\(wRaw)\u{001B}[0m"
                 } else {
-                    resetStr = "--"
+                    wDisplay = wRaw
                 }
+                let resetStr = "\(wDisplay) / \(fRaw)"
 
                 let inUse = threads[p, default: 0]
                 let maxSlots = config.maxActiveThreadsPerProfile
@@ -371,9 +455,9 @@ struct AgymuxCLI {
                     status = "\u{001B}[1;31mDEPLETED\u{001B}[0m"
                 }
 
-                print("\(pad(cat, 11)) \(pad(profileDisplay, 32)) \(pad(geminiStr, 15)) \(pad(claudeStr, 15)) \(pad(resetStr, 12)) \(pad(slotStr, 9)) \(status)")
+                print("\(pad(cat, 11)) \(pad(profileDisplay, 35)) \(pad(geminiStr, 15)) \(pad(claudeStr, 15)) \(pad(resetStr, 20)) \(pad(slotStr, 9)) \(status)")
             }
-            print(String(repeating: "─", count: 108))
+            print(String(repeating: "─", count: 123))
             return
         }
 
