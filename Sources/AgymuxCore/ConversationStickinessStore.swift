@@ -115,12 +115,7 @@ public final class ConversationStickinessStore: Sendable {
         }
 
         // 3. Bottleneck quota fraction check
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
+        let isClaudeRequested = QuotaSnapshot.isThirdPartyModel(requestedModel)
 
         let g5 = snapshot?.geminiFiveHour?.clampedRemainingFraction ?? 1.0
         let gw = snapshot?.geminiWeekly?.clampedRemainingFraction ?? 1.0

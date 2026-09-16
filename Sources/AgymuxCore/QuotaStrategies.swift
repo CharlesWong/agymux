@@ -23,7 +23,12 @@ public struct ScoredProfile: Sendable {
     public let score: Double
     public let quotaRemaining: Double
     public let activeThreads: Int
+    public let maxSlots: Int
     public let rationale: String
+
+    public var isEligible: Bool {
+        activeThreads < maxSlots && quotaRemaining >= 0.05 && score > -500.0
+    }
 }
 
 public enum QuotaStrategies {
@@ -68,12 +73,7 @@ public enum QuotaStrategies {
         now: Date
     ) -> ScoredProfile {
         // 1. Determine model family target
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
+        let isClaudeRequested = QuotaSnapshot.isThirdPartyModel(requestedModel)
 
         // 2. Extract per-window quota fractions
         let g5 = snapshot?.geminiFiveHour?.clampedRemainingFraction ?? 1.0
@@ -211,6 +211,7 @@ public enum QuotaStrategies {
             score: score,
             quotaRemaining: quotaFraction,
             activeThreads: threads,
+            maxSlots: maxSlots,
             rationale: reasonParts.joined(separator: ", ")
         )
     }

@@ -169,6 +169,13 @@ struct AgymuxCLI {
         if let explicit = explicitProfile {
             // Explicit override: bypass auto pool and stickiness
             targetProfile = explicit
+            try? concurrencyGuard.registerSession(
+                pid: getpid(),
+                profileName: targetProfile,
+                conversationId: targetConvId,
+                cwd: FileManager.default.currentDirectoryPath,
+                arguments: forwardedArgs
+            )
             fputs("\u{001B}[1;36m[agymux]\u{001B}[0m Using explicit profile '\(targetProfile)' (Model: \(effectiveModel)).\n", stderr)
         } else {
             // Auto pool selection
@@ -249,7 +256,7 @@ struct AgymuxCLI {
                     strategy: activeStrategy
                 )
 
-                if let best = candidateBest, best.quotaRemaining >= 0.05 {
+                if let best = candidateBest, best.isEligible {
                     try? concurrencyGuard.registerSession(
                         pid: getpid(),
                         profileName: best.profileName,
@@ -267,7 +274,7 @@ struct AgymuxCLI {
             }
 
             if chosen.isEmpty {
-                // Auto pool depleted - check configurable fallback to reserved pool
+                // Auto pool depleted or at capacity - check configurable fallback to reserved pool
                 let fallbackMode = config.reservedFallbackMode.lowercased()
                 let reservedCandidates = config.reserved
 
@@ -283,14 +290,14 @@ struct AgymuxCLI {
                         strategy: activeStrategy
                     )
 
-                    if let br = bestReserved, br.quotaRemaining >= 0.05 {
+                    if let br = bestReserved, br.isEligible {
                         var proceedWithReserved = false
                         if fallbackMode == "auto" {
-                            fputs("\u{001B}[1;33m[agymux] Auto Pool depleted; auto-fallback to reserved profile '\(br.profileName)'.\u{001B}[0m\n", stderr)
+                            fputs("\u{001B}[1;33m[agymux] Auto Pool depleted or at capacity; auto-fallback to reserved profile '\(br.profileName)'.\u{001B}[0m\n", stderr)
                             proceedWithReserved = true
                         } else if fallbackMode == "prompt" && isatty(STDIN_FILENO) != 0 {
                             let emailLabel = poolManager.email(for: br.profileName).map { " (\($0))" } ?? ""
-                            fputs("\n\u{001B}[1;33m[agymux] All Auto Pool profiles are depleted.\u{001B}[0m\n", stderr)
+                            fputs("\n\u{001B}[1;33m[agymux] All Auto Pool profiles are depleted or at capacity.\u{001B}[0m\n", stderr)
                             fputs("\u{001B}[1;36m[agymux] Unlock reserved profile '\(br.profileName)'\(emailLabel)? [y/N]: \u{001B}[0m", stderr)
                             fflush(stderr)
 
@@ -313,11 +320,11 @@ struct AgymuxCLI {
                                 arguments: forwardedArgs
                             )
                         } else {
-                            fputs("\u{001B}[1;31magymux: All profiles are depleted.\u{001B}[0m\n", stderr)
+                            fputs("\u{001B}[1;31magymux: All profiles are depleted or at capacity.\u{001B}[0m\n", stderr)
                             exit(1)
                         }
                     } else {
-                        fputs("\u{001B}[1;31magymux: All profiles are depleted.\u{001B}[0m\n", stderr)
+                        fputs("\u{001B}[1;31magymux: All profiles are depleted or at capacity.\u{001B}[0m\n", stderr)
                         exit(1)
                     }
                 } else {
@@ -343,6 +350,9 @@ struct AgymuxCLI {
                 entrySignalState: entrySignalState
             )
 
+            // Clean up session reservation if non-interactive mode completed
+            concurrencyGuard.unregisterSession(pid: Darwin.getpid())
+
             // Record conversation stickiness for future continuations
             if let activeId = targetConvId ?? stickinessStore.detectLatestConversationId() {
                 stickinessStore.recordUsage(
@@ -353,6 +363,7 @@ struct AgymuxCLI {
             }
             exit(exitCode)
         } catch {
+            concurrencyGuard.unregisterSession(pid: Darwin.getpid())
             fputs("\u{001B}[1;31magymux: \(error.localizedDescription)\u{001B}[0m\n", stderr)
             exit(1)
         }

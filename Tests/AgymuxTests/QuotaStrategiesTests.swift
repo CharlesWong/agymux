@@ -375,4 +375,60 @@ struct QuotaStrategiesTests {
 
         #expect(best?.profileName == "p2")
     }
+
+    @Test("Eligibility flag accurately disqualifies over-capacity and depleted candidates")
+    func testCandidateEligibilityDisqualification() {
+        // p1: 80% quota, but activeThreads == maxSlots (at capacity)
+        let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.80)
+        // p2: depleted (<5%)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.02, thirdParty5h: 0.02, geminiWeekly: 0.02)
+        // p3: weekly near-depleted (<10%)
+        let q3 = makeSnapshot(profileID: "p3", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.08)
+        // p4: healthy quota with free slot
+        let q4 = makeSnapshot(profileID: "p4", gemini5h: 0.60, thirdParty5h: 0.60, geminiWeekly: 0.60)
+
+        let quotas = ["p1": q1, "p2": q2, "p3": q3, "p4": q4]
+        let threads = ["p1": 3, "p2": 0, "p3": 0, "p4": 1]
+
+        // When evaluating p1 alone (over-capacity)
+        let bestP1 = QuotaStrategies.selectBestProfile(
+            candidates: ["p1"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+        #expect(bestP1?.isEligible == false)
+
+        // When evaluating p2 alone (depleted)
+        let bestP2 = QuotaStrategies.selectBestProfile(
+            candidates: ["p2"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+        #expect(bestP2?.isEligible == false)
+
+        // When evaluating p3 alone (weekly near-depleted)
+        let bestP3 = QuotaStrategies.selectBestProfile(
+            candidates: ["p3"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+        #expect(bestP3?.isEligible == false)
+
+        // When evaluating p4 alone (healthy with 1/3 threads)
+        let bestP4 = QuotaStrategies.selectBestProfile(
+            candidates: ["p4"],
+            quotas: quotas,
+            activeThreads: threads,
+            maxSlotsPerProfile: 3,
+            strategy: .smart
+        )
+        #expect(bestP4?.isEligible == true)
+        #expect(bestP4?.profileName == "p4")
+    }
 }

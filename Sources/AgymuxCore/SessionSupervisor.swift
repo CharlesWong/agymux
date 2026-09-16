@@ -124,8 +124,8 @@ public final class SessionSupervisor: Sendable {
                 strategy: strategy
             )
 
-            if candidateBest == nil || (candidateBest?.quotaRemaining ?? 0.0) < 0.05 {
-                // Auto pool depleted - check configurable fallback to reserved pool
+            if candidateBest == nil || candidateBest?.isEligible != true {
+                // Auto pool depleted or at capacity - check configurable fallback to reserved pool
                 let fallbackMode = config.reservedFallbackMode.lowercased()
                 let reservedCandidates = config.reserved.filter { $0 != currentProfile }
 
@@ -141,13 +141,13 @@ public final class SessionSupervisor: Sendable {
                         strategy: strategy
                     )
 
-                    if let br = bestReserved, br.quotaRemaining >= 0.05 {
+                    if let br = bestReserved, br.isEligible {
                         if fallbackMode == "auto" {
-                            fputs("\u{001B}[1;33m[agymux] Auto Pool depleted; auto-fallback to reserved profile '\(br.profileName)'.\u{001B}[0m\n", stderr)
+                            fputs("\u{001B}[1;33m[agymux] Auto Pool depleted or at capacity; auto-fallback to reserved profile '\(br.profileName)'.\u{001B}[0m\n", stderr)
                             candidateBest = br
                         } else if fallbackMode == "prompt" && isatty(STDIN_FILENO) != 0 {
                             let emailLabel = poolManager.email(for: br.profileName).map { " (\($0))" } ?? ""
-                            fputs("\n\u{001B}[1;33m[agymux] All Auto Pool profiles are depleted.\u{001B}[0m\n", stderr)
+                            fputs("\n\u{001B}[1;33m[agymux] All Auto Pool profiles are depleted or at capacity.\u{001B}[0m\n", stderr)
                             fputs("\u{001B}[1;36m[agymux] Unlock reserved profile '\(br.profileName)'\(emailLabel) to continue? [y/N]: \u{001B}[0m", stderr)
                             fflush(stderr)
 
@@ -160,8 +160,8 @@ public final class SessionSupervisor: Sendable {
                 }
             }
 
-            guard let best = candidateBest, best.quotaRemaining >= 0.05 else {
-                fputs("\u{001B}[1;31m[agymux] No available profile has sufficient quota (>5%).\u{001B}[0m\n", stderr)
+            guard let best = candidateBest, best.isEligible else {
+                fputs("\u{001B}[1;31m[agymux] No available profile has sufficient quota (>5%) or free capacity.\u{001B}[0m\n", stderr)
                 if let lastData = lastFailedOutput {
                     FileHandle.standardOutput.write(lastData)
                 }
@@ -170,8 +170,15 @@ public final class SessionSupervisor: Sendable {
 
             fputs("\u{001B}[1;32m[agymux] Resuming session on '\(best.profileName)' (\(Int(best.quotaRemaining * 100))% quota remaining)…\u{001B}[0m\n", stderr)
 
-            // 6. Update arguments for resume
+            // 6. Update session reservation & arguments for resume
             currentProfile = best.profileName
+            try? concurrencyGuard.registerSession(
+                pid: getpid(),
+                profileName: currentProfile,
+                conversationId: resolvedConversationId,
+                cwd: FileManager.default.currentDirectoryPath,
+                arguments: currentArgs
+            )
             if let convId = resolvedConversationId {
                 ConversationStickinessStore.shared.recordUsage(
                     conversationId: convId,
@@ -230,15 +237,20 @@ public final class SessionSupervisor: Sendable {
         try process.run()
         let childPid = process.processIdentifier
 
-        try? concurrencyGuard.registerSession(
-            pid: childPid,
-            profileName: profileName,
-            conversationId: detectedConvId,
-            cwd: FileManager.default.currentDirectoryPath,
-            arguments: arguments
-        )
+        let parentAlreadyRegistered = concurrencyGuard.activeSessions().contains { $0.pid == Darwin.getpid() }
+        if !parentAlreadyRegistered {
+            try? concurrencyGuard.registerSession(
+                pid: childPid,
+                profileName: profileName,
+                conversationId: detectedConvId,
+                cwd: FileManager.default.currentDirectoryPath,
+                arguments: arguments
+            )
+        }
         defer {
-            concurrencyGuard.unregisterSession(pid: childPid)
+            if !parentAlreadyRegistered {
+                concurrencyGuard.unregisterSession(pid: childPid)
+            }
         }
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()

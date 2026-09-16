@@ -96,6 +96,7 @@ public final class ConcurrencyGuard: Sendable {
 
             let isAgyProcess = binaryName == "agy"
                 || binaryName == "agyctl"
+                || binaryName == "agyx"
                 || binaryName.contains("agymux")
                 || binaryName.hasPrefix("agy.")
                 || binaryName.contains("test")

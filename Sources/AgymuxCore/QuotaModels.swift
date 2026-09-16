@@ -177,14 +177,13 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         return candidates.min { ($0.clampedRemainingFraction ?? 1.0) < ($1.clampedRemainingFraction ?? 1.0) }
     }
 
-    public func isDepleted(for requestedModel: String? = nil, at now: Date = .now) -> Bool {
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
+    public static func isThirdPartyModel(_ model: String?) -> Bool {
+        guard let m = model?.lowercased() else { return false }
+        return m.contains("claude") || m.contains("gpt") || m.contains("oss")
+    }
 
+    public func isDepleted(for requestedModel: String? = nil, at now: Date = .now) -> Bool {
+        let isClaudeRequested = Self.isThirdPartyModel(requestedModel)
         if isClaudeRequested {
             if let t5 = thirdPartyFiveHour, t5.isDepleted(at: now) { return true }
             if let tw = thirdPartyWeekly, tw.isDepleted(at: now) { return true }
@@ -196,23 +195,11 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     }
 
     public func weeklyResetDate(for requestedModel: String? = nil) -> Date? {
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
-        return isClaudeRequested ? thirdPartyWeekly?.resetAt : geminiWeekly?.resetAt
+        Self.isThirdPartyModel(requestedModel) ? thirdPartyWeekly?.resetAt : geminiWeekly?.resetAt
     }
 
     public func fiveHourResetDate(for requestedModel: String? = nil) -> Date? {
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
-        return isClaudeRequested ? thirdPartyFiveHour?.resetAt : geminiFiveHour?.resetAt
+        Self.isThirdPartyModel(requestedModel) ? thirdPartyFiveHour?.resetAt : geminiFiveHour?.resetAt
     }
 
     public func primaryResetDate(for requestedModel: String? = nil, at now: Date = .now) -> Date? {
@@ -244,25 +231,13 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     }
 
     public func fiveHourFraction(for requestedModel: String? = nil) -> Double {
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
-        return isClaudeRequested
+        Self.isThirdPartyModel(requestedModel)
             ? (thirdPartyFiveHour?.clampedRemainingFraction ?? 1.0)
             : (geminiFiveHour?.clampedRemainingFraction ?? 1.0)
     }
 
     public func weeklyFraction(for requestedModel: String? = nil) -> Double {
-        let isClaudeRequested: Bool
-        if let model = requestedModel?.lowercased() {
-            isClaudeRequested = model.contains("claude") || model.contains("gpt") || model.contains("oss")
-        } else {
-            isClaudeRequested = false
-        }
-        return isClaudeRequested
+        Self.isThirdPartyModel(requestedModel)
             ? (thirdPartyWeekly?.clampedRemainingFraction ?? 1.0)
             : (geminiWeekly?.clampedRemainingFraction ?? 1.0)
     }
