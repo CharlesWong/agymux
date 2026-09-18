@@ -97,6 +97,11 @@ public final class ConversationStickinessStore: Sendable {
         loadConfig().records[conversationId]?.profileName
     }
 
+    /// Return the full stickiness record for a conversation if known.
+    public func record(for conversationId: String) -> StickinessRecord? {
+        loadConfig().records[conversationId]
+    }
+
     /// Check if the sticky profile has sufficient remaining quota and capacity.
     public func evaluateStickiness(
         profileName: String,
@@ -130,16 +135,20 @@ public final class ConversationStickinessStore: Sendable {
         let t5 = snapshot.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0
         let tw = snapshot.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0
 
-        let bottleneckQuota = isClaudeRequested ? min(t5, tw) : min(g5, gw)
+        let fFrac = isClaudeRequested ? t5 : g5
+        let wFrac = isClaudeRequested ? tw : gw
+        let bottleneckQuota = min(fFrac, wFrac)
+
+        let fPct = Int((fFrac * 100).rounded())
+        let wPct = Int((wFrac * 100).rounded())
+        let pct = Int((bottleneckQuota * 100).rounded())
+        let reqPct = Int((threshold * 100).rounded())
 
         if bottleneckQuota < threshold {
-            let pct = Int(bottleneckQuota * 100)
-            let reqPct = Int(threshold * 100)
-            return (false, bottleneckQuota, "Remaining quota (\(pct)%) is below stickiness threshold (\(reqPct)%)")
+            return (false, bottleneckQuota, "Remaining quota (\(pct)% [5h: \(fPct)%, Wk: \(wPct)%]) is below stickiness threshold (\(reqPct)%)")
         }
 
-        let pct = Int(bottleneckQuota * 100)
-        return (true, bottleneckQuota, "Sufficient headroom (\(pct)% quota) for cache reuse")
+        return (true, bottleneckQuota, "Sufficient headroom (\(pct)% quota [5h: \(fPct)%, Wk: \(wPct)%]) for cache reuse")
     }
 
     /// Detects the newest conversation ID across ~/.gemini/antigravity-cli, prioritizing conversations belonging to the given workspace.

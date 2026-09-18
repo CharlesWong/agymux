@@ -51,8 +51,13 @@ struct ConversationStickinessTests {
         let sticky = store.stickyProfile(for: "conv-1234")
         #expect(sticky == "everestmountaineer")
 
+        let record = store.record(for: "conv-1234")
+        #expect(record?.profileName == "everestmountaineer")
+        #expect(record?.model == "gemini-3.8-flash-high")
+
         let nonExistent = store.stickyProfile(for: "conv-unknown")
         #expect(nonExistent == nil)
+        #expect(store.record(for: "conv-unknown") == nil)
     }
 
     @Test("Stickiness is maintained when profile has >=15% quota and available slots")

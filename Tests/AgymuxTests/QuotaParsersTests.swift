@@ -177,5 +177,76 @@ struct QuotaParsersTests {
         let t5 = try #require(snapshot.thirdPartyFiveHour)
         #expect(t5.clampedRemainingFraction == 0.0)
         #expect(snapshot.isDepleted(for: "claude-3-7-sonnet"))
+        #expect(snapshot.bottleneckFraction(for: "claude-3-7-sonnet") == 0.0)
+    }
+
+    @Test("Decoding QuotaSnapshot from JSON automatically resolves cascading exhaustion from external caches")
+    func testSnapshotDecodingSanitizesCascadingExhaustion() throws {
+        let jsonString = """
+        {
+            "profileID": "everestmountaineer",
+            "fetchedAt": "2026-09-17T23:31:20Z",
+            "isCached": false,
+            "warnings": [],
+            "metrics": [
+                {
+                    "group": "gemini",
+                    "scope": "gemini-family",
+                    "modelIDs": ["Gemini Flash"],
+                    "window": "5h",
+                    "remainingFraction": 0.80,
+                    "source": "cloud_quota_summary",
+                    "fetchedAt": "2026-09-17T23:31:20Z",
+                    "confidence": "high"
+                },
+                {
+                    "group": "gemini",
+                    "scope": "gemini-family",
+                    "modelIDs": ["Gemini Flash"],
+                    "window": "weekly",
+                    "remainingFraction": 0.13,
+                    "source": "cloud_quota_summary",
+                    "fetchedAt": "2026-09-17T23:31:20Z",
+                    "confidence": "high"
+                },
+                {
+                    "group": "third-party",
+                    "scope": "third-party-family",
+                    "modelIDs": ["Claude Sonnet"],
+                    "window": "5h",
+                    "remainingFraction": 1.0,
+                    "source": "cloud_quota_summary",
+                    "fetchedAt": "2026-09-17T23:31:20Z",
+                    "confidence": "high"
+                },
+                {
+                    "group": "third-party",
+                    "scope": "third-party-family",
+                    "modelIDs": ["Claude Sonnet"],
+                    "window": "weekly",
+                    "remainingFraction": 0.0,
+                    "source": "cloud_quota_summary",
+                    "fetchedAt": "2026-09-17T23:31:20Z",
+                    "confidence": "high"
+                }
+            ]
+        }
+        """
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snap = try decoder.decode(QuotaSnapshot.self, from: Data(jsonString.utf8))
+
+        // Gemini: 80% 5h, 13% weekly -> bottleneck is 13%
+        #expect(snap.fiveHourFraction(for: "gemini-3.8-flash-high") == 0.80)
+        #expect(snap.weeklyFraction(for: "gemini-3.8-flash-high") == 0.13)
+        #expect(snap.bottleneckFraction(for: "gemini-3.8-flash-high") == 0.13)
+
+        // Third-party: weekly was 0.0, so phantom 1.0 on 5h MUST be sanitized to 0.0!
+        #expect(snap.thirdPartyWeekly?.clampedRemainingFraction == 0.0)
+        #expect(snap.thirdPartyFiveHour?.clampedRemainingFraction == 0.0)
+        #expect(snap.fiveHourFraction(for: "claude-3-7-sonnet") == 0.0)
+        #expect(snap.bottleneckFraction(for: "claude-3-7-sonnet") == 0.0)
+        #expect(snap.isDepleted(for: "claude-3-7-sonnet"))
     }
 }

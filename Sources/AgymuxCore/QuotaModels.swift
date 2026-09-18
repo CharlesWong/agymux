@@ -129,6 +129,35 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     public var warnings: [String]
     public var isCached: Bool
 
+    public static func resolveCascadingExhaustion(_ metrics: [QuotaMetric]) -> [QuotaMetric] {
+        var resolvedMetrics: [QuotaMetric] = []
+        let grouped = Dictionary(grouping: metrics, by: { $0.group })
+        for (_, groupMetrics) in grouped {
+            let weekly = groupMetrics.first(where: { $0.window == .weekly })
+            let weeklyDepleted = (weekly?.clampedRemainingFraction ?? 1.0) <= 0.005
+            for m in groupMetrics {
+                if weeklyDepleted && m.window == .fiveHour && (m.remainingFraction ?? 0.0) > 0.0 {
+                    resolvedMetrics.append(
+                        QuotaMetric(
+                            group: m.group,
+                            scope: m.scope,
+                            modelIDs: m.modelIDs,
+                            window: m.window,
+                            remainingFraction: 0.0,
+                            resetAt: m.resetAt,
+                            source: m.source,
+                            fetchedAt: m.fetchedAt,
+                            confidence: m.confidence
+                        )
+                    )
+                } else {
+                    resolvedMetrics.append(m)
+                }
+            }
+        }
+        return resolvedMetrics
+    }
+
     public init(
         profileID: String,
         account: String? = nil,
@@ -142,9 +171,21 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         self.account = account
         self.tier = tier
         self.fetchedAt = fetchedAt
-        self.metrics = metrics
+        self.metrics = Self.resolveCascadingExhaustion(metrics)
         self.warnings = warnings
         self.isCached = isCached
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.profileID = try container.decode(String.self, forKey: .profileID)
+        self.account = try container.decodeIfPresent(String.self, forKey: .account)
+        self.tier = try container.decodeIfPresent(String.self, forKey: .tier)
+        self.fetchedAt = try container.decode(Date.self, forKey: .fetchedAt)
+        let rawMetrics = try container.decode([QuotaMetric].self, forKey: .metrics)
+        self.metrics = Self.resolveCascadingExhaustion(rawMetrics)
+        self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        self.isCached = try container.decodeIfPresent(Bool.self, forKey: .isCached) ?? false
     }
 
     public func metric(group: QuotaGroup, window: QuotaWindowKind) -> QuotaMetric? {
@@ -241,6 +282,10 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
         Self.isThirdPartyModel(requestedModel)
             ? (thirdPartyWeekly?.clampedRemainingFraction ?? 0.0)
             : (geminiWeekly?.clampedRemainingFraction ?? 0.0)
+    }
+
+    public func bottleneckFraction(for requestedModel: String? = nil) -> Double {
+        min(fiveHourFraction(for: requestedModel), weeklyFraction(for: requestedModel))
     }
 
     /// Whether this profile has a brand new, unused 100% weekly quota ready to kick off its 7-day counter.

@@ -193,19 +193,13 @@ public final class QuotaBroker: Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        let candidateURLs = [
-            agymuxCacheDirectory.appendingPathComponent("\(profileName).json"),
-            agySwitcherProfilesDirectory.appendingPathComponent("\(profileName).json")
-        ]
-
-        for url in candidateURLs {
-            guard let data = try? Data(contentsOf: url),
-                  var snap = try? decoder.decode(QuotaSnapshot.self, from: data)
-            else { continue }
-            if abs(snap.fetchedAt.timeIntervalSinceNow) <= maxAge {
-                snap.isCached = true
-                return snap
-            }
+        let fileURL = agymuxCacheDirectory.appendingPathComponent("\(profileName).json")
+        guard let data = try? Data(contentsOf: fileURL),
+              var snap = try? decoder.decode(QuotaSnapshot.self, from: data)
+        else { return nil }
+        if abs(snap.fetchedAt.timeIntervalSinceNow) <= maxAge {
+            snap.isCached = true
+            return snap
         }
         return nil
     }

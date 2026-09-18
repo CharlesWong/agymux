@@ -138,12 +138,6 @@ struct AgymuxCLI {
             i += 1
         }
 
-        // Apply configurable default model if not explicitly specified by the user
-        let effectiveModel = userSpecifiedModel ?? config.defaultModel
-        if userSpecifiedModel == nil {
-            forwardedArgs.insert(contentsOf: ["--model", effectiveModel], at: 0)
-        }
-
         // Check if this session is a continuation of an existing conversation
         let stickinessStore = ConversationStickinessStore.shared
         var explicitConvId: String?
@@ -162,6 +156,18 @@ struct AgymuxCLI {
         }
 
         let targetConvId = explicitConvId ?? (isContinuation ? stickinessStore.detectLatestConversationId(forWorkspace: FileManager.default.currentDirectoryPath) : nil)
+
+        // Determine effective model:
+        // 1. Explicit --model passed by user on command line
+        // 2. If continuation, check if the existing conversation had a recorded model
+        // 3. Configured default model
+        let convModel = (isContinuation && targetConvId != nil) ? stickinessStore.record(for: targetConvId!)?.model : nil
+        let effectiveModel = userSpecifiedModel ?? convModel ?? config.defaultModel
+
+        // Only explicitly inject --model if user did not specify one AND this is a fresh conversation
+        if userSpecifiedModel == nil && !isContinuation {
+            forwardedArgs.insert(contentsOf: ["--model", effectiveModel], at: 0)
+        }
 
         let targetProfile: String
         let activeStrategy = strategyOverride ?? QuotaStrategy(rawValue: config.defaultStrategy) ?? .smart
@@ -192,6 +198,7 @@ struct AgymuxCLI {
             var candidateBestRationale: String?
             var candidateBestThreads = 0
             var candidateBestQuota = 0.0
+            var isStickyMaintained = false
 
             let chosen: String = concurrencyGuard.withLock {
                 concurrencyGuard.pruneStaleSessions()
@@ -230,12 +237,15 @@ struct AgymuxCLI {
                         if let freshCandidate = fresh100Candidate, !stickyHasFresh100 {
                             fputs("\u{001B}[1;35m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': fresh 100% weekly quota on '\(freshCandidate)' (TOP PRIORITY: kick off weekly counter).\n", stderr)
                         } else if sticky5h < 0.25, let healthy = healthyIdleCandidate {
-                            fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': 5h quota is low (\(Int(sticky5h * 100))%), switching to healthy idle profile '\(healthy)' to avoid quota wall.\n", stderr)
+                            fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Yielding cache stickiness on '\(sticky)': 5h quota is low (\(Int((sticky5h * 100).rounded()))%), switching to healthy idle profile '\(healthy)' to avoid quota wall.\n", stderr)
                         } else {
                             stickySelected = sticky
-                            let quotaPercent = Int(eval.quotaRemaining * 100)
+                            isStickyMaintained = true
+                            let fPct = Int(((quotas[sticky]?.fiveHourFraction(for: effectiveModel) ?? 0.0) * 100).rounded())
+                            let wPct = Int(((quotas[sticky]?.weeklyFraction(for: effectiveModel) ?? 0.0) * 100).rounded())
+                            let quotaPercent = Int((eval.quotaRemaining * 100).rounded())
                             let activeCount = threads[sticky, default: 0]
-                            fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Maintaining cache stickiness on \u{001B}[1m\(sticky)\u{001B}[0m (\(quotaPercent)% quota · \(activeCount)/\(config.maxActiveThreadsPerProfile) threads · Model: \(effectiveModel))\n", stderr)
+                            fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Maintaining cache stickiness on \u{001B}[1m\(sticky)\u{001B}[0m (\(quotaPercent)% quota [5h: \(fPct)% · Wk: \(wPct)%] · \(activeCount)/\(config.maxActiveThreadsPerProfile) threads · Model: \(effectiveModel))\n", stderr)
                         }
                     } else {
                         fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Breaking cache stickiness on '\(sticky)': \(eval.reason). Re-routing to best pool profile…\n", stderr)
@@ -251,7 +261,7 @@ struct AgymuxCLI {
                         arguments: forwardedArgs
                     )
                     candidateBestThreads = threads[sticky, default: 0]
-                    candidateBestQuota = quotas[sticky]?.fiveHourFraction(for: effectiveModel) ?? 0.0
+                    candidateBestQuota = quotas[sticky]?.bottleneckFraction(for: effectiveModel) ?? 0.0
                     return sticky
                 }
 
@@ -327,6 +337,11 @@ struct AgymuxCLI {
                                 cwd: FileManager.default.currentDirectoryPath,
                                 arguments: forwardedArgs
                             )
+                            let fPct = Int(((resQuotas[br.profileName]?.fiveHourFraction(for: effectiveModel) ?? 0.0) * 100).rounded())
+                            let wPct = Int(((resQuotas[br.profileName]?.weeklyFraction(for: effectiveModel) ?? 0.0) * 100).rounded())
+                            let quotaPercent = Int((candidateBestQuota * 100).rounded())
+                            let rationaleStr = candidateBestRationale.map { " · \($0)" } ?? ""
+                            fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Dispatched to \u{001B}[1m\(targetProfile)\u{001B}[0m (\(quotaPercent)% quota [5h: \(fPct)% · Wk: \(wPct)%] · \(candidateBestThreads) active threads · Model: \(effectiveModel)\(rationaleStr))\n", stderr)
                         } else {
                             fputs("\u{001B}[1;31magymux: All profiles are depleted or at capacity.\u{001B}[0m\n", stderr)
                             exit(1)
@@ -341,9 +356,13 @@ struct AgymuxCLI {
                 }
             } else {
                 targetProfile = chosen
-                let quotaPercent = Int(candidateBestQuota * 100)
-                let rationaleStr = candidateBestRationale.map { " · \($0)" } ?? ""
-                fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Dispatched to \u{001B}[1m\(targetProfile)\u{001B}[0m (\(quotaPercent)% quota · \(candidateBestThreads) active threads · Model: \(effectiveModel)\(rationaleStr))\n", stderr)
+                if !isStickyMaintained {
+                    let fPct = Int(((quotas[targetProfile]?.fiveHourFraction(for: effectiveModel) ?? 0.0) * 100).rounded())
+                    let wPct = Int(((quotas[targetProfile]?.weeklyFraction(for: effectiveModel) ?? 0.0) * 100).rounded())
+                    let quotaPercent = Int((candidateBestQuota * 100).rounded())
+                    let rationaleStr = candidateBestRationale.map { " · \($0)" } ?? ""
+                    fputs("\u{001B}[1;32m[agymux]\u{001B}[0m Dispatched to \u{001B}[1m\(targetProfile)\u{001B}[0m (\(quotaPercent)% quota [5h: \(fPct)% · Wk: \(wPct)%] · \(candidateBestThreads) active threads · Model: \(effectiveModel)\(rationaleStr))\n", stderr)
+                }
             }
         }
 
