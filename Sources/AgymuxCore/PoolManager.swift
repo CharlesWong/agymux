@@ -22,7 +22,7 @@ public struct PoolConfiguration: Codable, Sendable {
         version: Int = 1,
         defaultStrategy: String = "smart",
         defaultModel: String = "gemini-3.8-flash-high",
-        maxActiveThreadsPerProfile: Int = 3,
+        maxActiveThreadsPerProfile: Int = 5,
         reservedFallbackMode: String = "prompt",
         reserved: [String] = [],
         auto: [String] = []
@@ -41,7 +41,7 @@ public struct PoolConfiguration: Codable, Sendable {
         self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         self.defaultStrategy = try container.decodeIfPresent(String.self, forKey: .defaultStrategy) ?? "smart"
         self.defaultModel = try container.decodeIfPresent(String.self, forKey: .defaultModel) ?? "gemini-3.8-flash-high"
-        self.maxActiveThreadsPerProfile = try container.decodeIfPresent(Int.self, forKey: .maxActiveThreadsPerProfile) ?? 3
+        self.maxActiveThreadsPerProfile = try container.decodeIfPresent(Int.self, forKey: .maxActiveThreadsPerProfile) ?? 5
         self.reservedFallbackMode = try container.decodeIfPresent(String.self, forKey: .reservedFallbackMode) ?? "prompt"
         self.reserved = try container.decodeIfPresent([String].self, forKey: .reserved) ?? []
         self.auto = try container.decodeIfPresent([String].self, forKey: .auto) ?? []
@@ -136,9 +136,7 @@ public final class PoolManager: Sendable {
             for p in aiswProfiles {
                 let em = email(for: p)?.lowercased() ?? ""
                 let pLower = p.lowercased()
-                let isReserved = pLower == "current"
-                    || pLower.contains("reserved")
-                    || envReservedProfiles.contains(pLower)
+                let isReserved = envReservedProfiles.contains(pLower)
                     || (!em.isEmpty && envReservedEmails.contains(em))
 
                 if isReserved {
@@ -166,8 +164,9 @@ public final class PoolManager: Sendable {
             config.maxActiveThreadsPerProfile = 3
         }
 
-        // Merge any newly discovered aisw profiles not yet in config
         var changed = false
+
+        // Merge any newly discovered aisw profiles not yet in config
         let existing = Set(config.reserved + config.auto)
         let envReservedProfiles = ProcessInfo.processInfo.environment["AGYMUX_RESERVED_PROFILES"]?
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? []
@@ -177,9 +176,7 @@ public final class PoolManager: Sendable {
         for p in aiswProfiles where !existing.contains(p) {
             let em = email(for: p)?.lowercased() ?? ""
             let pLower = p.lowercased()
-            let isReserved = pLower == "current"
-                || pLower.contains("reserved")
-                || envReservedProfiles.contains(pLower)
+            let isReserved = envReservedProfiles.contains(pLower)
                 || (!em.isEmpty && envReservedEmails.contains(em))
 
             if isReserved {
@@ -196,6 +193,17 @@ public final class PoolManager: Sendable {
         }
 
         return config
+    }
+
+    /// Moves all profiles to the auto pool, leaving the reserved pool empty.
+    public func moveAllToAuto() {
+        var config = loadConfig()
+        for p in config.reserved where !config.auto.contains(p) {
+            config.auto.append(p)
+        }
+        config.reserved.removeAll()
+        config.auto.sort()
+        saveConfig(config)
     }
 
     public func saveConfig(_ config: PoolConfiguration) {

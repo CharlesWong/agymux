@@ -4,7 +4,7 @@ import Foundation
 
 @Suite("PoolManager Tests")
 struct PoolManagerTests {
-    @Test("Default configuration segregates auto and reserved pools with limit 3")
+    @Test("Default configuration places all profiles in auto and leaves reserved empty")
     func testDefaultConfig() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -29,9 +29,91 @@ struct PoolManagerTests {
         let manager = PoolManager(configURL: configURL, aiswConfigURL: aiswURL)
         let config = manager.loadConfig()
 
-        #expect(config.maxActiveThreadsPerProfile == 3)
+        #expect(config.maxActiveThreadsPerProfile == 5)
         #expect(config.defaultStrategy == "smart")
         #expect(config.reservedFallbackMode == "prompt")
+        #expect(config.reserved.isEmpty)
+        #expect(config.auto.count == 4)
+        #expect(config.auto.contains("current"))
+        #expect(config.auto.contains("mitnick162"))
+        #expect(config.auto.contains("charleswongjy"))
+        #expect(config.auto.contains("quavolve"))
+    }
+
+    @Test("moveAllToAuto clears reserved pool and moves all profiles to auto")
+    func testMoveAllToAuto() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let configURL = tempDir.appendingPathComponent("pools.json")
+        let aiswURL = tempDir.appendingPathComponent("aisw_config.json")
+
+        let initialConfig = PoolConfiguration(
+            version: 1,
+            defaultStrategy: "smart",
+            defaultModel: "gemini-3.8-flash-high",
+            maxActiveThreadsPerProfile: 3,
+            reservedFallbackMode: "prompt",
+            reserved: ["current", "mitnick162"],
+            auto: ["charleswongjy", "quavolve"]
+        )
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(initialConfig)
+        try data.write(to: configURL)
+
+        let manager = PoolManager(configURL: configURL, aiswConfigURL: aiswURL)
+        manager.moveAllToAuto()
+        let loaded = manager.loadConfig()
+
+        #expect(loaded.reserved.isEmpty)
+        #expect(loaded.auto.count == 4)
+        #expect(loaded.auto.contains("current"))
+        #expect(loaded.auto.contains("mitnick162"))
+    }
+
+    @Test("Mitnick162 is healed from reserved to auto on config load")
+    func testMitnick162AutoHealing() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let configURL = tempDir.appendingPathComponent("pools.json")
+        let aiswURL = tempDir.appendingPathComponent("aisw_config.json")
+
+        // Pre-populate pools.json where mitnick162 was mistakenly placed in reserved
+        let badConfig = PoolConfiguration(
+            version: 1,
+            defaultStrategy: "smart",
+            defaultModel: "gemini-3.8-flash-high",
+            maxActiveThreadsPerProfile: 3,
+            reservedFallbackMode: "prompt",
+            reserved: ["current", "mitnick162"],
+            auto: ["charleswongjy", "quavolve"]
+        )
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(badConfig)
+        try data.write(to: configURL)
+
+        let aiswMock: [String: Any] = [
+            "profiles": [
+                "antigravity": [
+                    "current": [:],
+                    "charleswongjy": [:],
+                    "quavolve": [:],
+                    "mitnick162": [:]
+                ]
+            ]
+        ]
+        let aiswData = try JSONSerialization.data(withJSONObject: aiswMock)
+        try aiswData.write(to: aiswURL)
+
+        let manager = PoolManager(configURL: configURL, aiswConfigURL: aiswURL)
+        let loaded = manager.loadConfig()
+
+        #expect(loaded.reserved == ["current"])
+        #expect(loaded.auto.contains("mitnick162"))
+        #expect(!loaded.reserved.contains("mitnick162"))
     }
 
     @Test("Changing category moves profile between pools")

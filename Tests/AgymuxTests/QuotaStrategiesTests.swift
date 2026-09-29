@@ -380,8 +380,8 @@ struct QuotaStrategiesTests {
     func testCandidateEligibilityDisqualification() {
         // p1: 80% quota, but activeThreads == maxSlots (at capacity)
         let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.80)
-        // p2: depleted (<5%)
-        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.02, thirdParty5h: 0.02, geminiWeekly: 0.02)
+        // p2: depleted (<0.5%)
+        let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.002, thirdParty5h: 0.002, geminiWeekly: 0.002)
         // p3: weekly near-depleted (<10%)
         let q3 = makeSnapshot(profileID: "p3", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.08)
         // p4: healthy quota with free slot

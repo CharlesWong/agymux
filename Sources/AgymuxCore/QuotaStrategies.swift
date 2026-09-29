@@ -25,9 +25,28 @@ public struct ScoredProfile: Sendable {
     public let activeThreads: Int
     public let maxSlots: Int
     public let rationale: String
+    public let isSoftOverflow: Bool
+
+    public init(
+        profileName: String,
+        score: Double,
+        quotaRemaining: Double,
+        activeThreads: Int,
+        maxSlots: Int,
+        rationale: String,
+        isSoftOverflow: Bool = false
+    ) {
+        self.profileName = profileName
+        self.score = score
+        self.quotaRemaining = quotaRemaining
+        self.activeThreads = activeThreads
+        self.maxSlots = maxSlots
+        self.rationale = rationale
+        self.isSoftOverflow = isSoftOverflow
+    }
 
     public var isEligible: Bool {
-        activeThreads < maxSlots && quotaRemaining >= 0.05 && score > -500.0
+        activeThreads < maxSlots && quotaRemaining >= 0.005 && score > -5_000.0
     }
 }
 
@@ -58,7 +77,35 @@ public enum QuotaStrategies {
             )
         }
 
-        // Return highest scoring candidate
+        // 1. Highest scoring candidate that is strictly eligible (activeThreads < maxSlots and quota >= 0.005)
+        let eligible = scored.filter { $0.isEligible }
+        if let best = eligible.max(by: { $0.score < $1.score }) {
+            return best
+        }
+
+        // 2. Soft-overflow fallback: if all candidates with non-zero quota are at or above maxSlots,
+        // do not fail hard. Instead, select the candidate with quota (>= 0.5%) that has the fewest active threads.
+        let withQuota = scored.filter {
+            $0.quotaRemaining >= 0.005 && (quotas[$0.profileName]?.isDepleted(for: requestedModel, at: now) == false)
+        }
+        if let bestOverflow = withQuota.min(by: {
+            if $0.activeThreads != $1.activeThreads {
+                return $0.activeThreads < $1.activeThreads
+            }
+            return $0.score > $1.score
+        }) {
+            return ScoredProfile(
+                profileName: bestOverflow.profileName,
+                score: bestOverflow.score,
+                quotaRemaining: bestOverflow.quotaRemaining,
+                activeThreads: bestOverflow.activeThreads,
+                maxSlots: bestOverflow.maxSlots,
+                rationale: "\(bestOverflow.rationale), [Soft-overflow slot: \(bestOverflow.activeThreads)/\(bestOverflow.maxSlots)]",
+                isSoftOverflow: true
+            )
+        }
+
+        // Return highest scoring candidate as fallback
         return scored.max(by: { $0.score < $1.score })
     }
 
@@ -118,14 +165,14 @@ public enum QuotaStrategies {
 
         // Hard disqualifications
         var hardPenalty = 0.0
-        if quotaFraction < 0.05 {
-            hardPenalty -= 10_000.0 // Depleted account (either 5h or weekly is exhausted)
+        if fiveHourFraction < 0.01 || weeklyFraction < 0.005 {
+            hardPenalty -= 10_000.0 // Depleted account (5h < 1% or weekly < 0.5%)
         }
-        if weeklyFraction < 0.10 {
-            hardPenalty -= 2_000.0 // Weekly near-depletion (<10% locks account for up to 7 days)
+        if weeklyFraction < 0.05 {
+            hardPenalty -= 2_000.0 // Weekly near-depletion (<5% locks account for up to 7 days)
         }
         if threads >= maxSlots {
-            hardPenalty -= 10_000.0 * Double(threads - maxSlots + 1) // Over-capacity
+            hardPenalty -= 5_000.0 * Double(threads - maxSlots + 1) // Over-capacity
         }
 
         // Low fuel buffer penalties:

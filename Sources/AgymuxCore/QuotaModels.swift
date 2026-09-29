@@ -112,7 +112,8 @@ public struct QuotaMetric: Codable, Hashable, Identifiable, Sendable {
 
     public func isDepleted(at now: Date = .now) -> Bool {
         guard let fraction = clampedRemainingFraction else { return true }
-        if fraction <= 0.05 {
+        let threshold = (window == .weekly) ? 0.005 : 0.01
+        if fraction <= threshold {
             if let resetAt, resetAt <= now { return false }
             return true
         }
