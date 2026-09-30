@@ -21,6 +21,7 @@ public final class SessionSupervisor: Sendable {
         arguments: [String],
         strategy: QuotaStrategy,
         requestedModel: String?,
+        fallbackModel: String? = nil,
         entrySignalState: ExecSignalState
     ) async throws -> Int32 {
         let isInteractive = !arguments.contains("-p") && !arguments.contains("--print")
@@ -68,6 +69,7 @@ public final class SessionSupervisor: Sendable {
 
         var currentProfile = initialProfile
         var currentArgs = arguments
+        var effectiveActiveModel = requestedModel
         var attempts = 0
         let maxMigrations = 4
 
@@ -93,7 +95,7 @@ public final class SessionSupervisor: Sendable {
                 launch: launch,
                 profileName: currentProfile,
                 arguments: currentArgs,
-                requestedModel: requestedModel
+                requestedModel: effectiveActiveModel
             )
             lastFailedOutput = outputData
 
@@ -119,7 +121,7 @@ public final class SessionSupervisor: Sendable {
                 quotas: quotas,
                 activeThreads: threads,
                 maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
-                requestedModel: requestedModel,
+                requestedModel: effectiveActiveModel,
                 currentlyActive: currentProfile,
                 strategy: strategy
             )
@@ -136,7 +138,7 @@ public final class SessionSupervisor: Sendable {
                         quotas: resQuotas,
                         activeThreads: threads,
                         maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
-                        requestedModel: requestedModel,
+                        requestedModel: effectiveActiveModel,
                         currentlyActive: currentProfile,
                         strategy: strategy
                     )
@@ -160,7 +162,39 @@ public final class SessionSupervisor: Sendable {
                 }
             }
 
-            guard let best = candidateBest, best.isEligible else {
+            if candidateBest == nil || candidateBest?.isEligible != true {
+                // If requested model is exhausted, check if fallback model is configured or available
+                let candidateFallback: String? = {
+                    if let explicitFallback = fallbackModel {
+                        if explicitFallback.lowercased() == "auto" {
+                            let isCurrentlyClaude = QuotaSnapshot.isThirdPartyModel(effectiveActiveModel)
+                            return isCurrentlyClaude ? "gemini-3.8-flash-high" : "claude-sonnet-4-6"
+                        }
+                        return explicitFallback
+                    }
+                    return nil
+                }()
+
+                if let fallback = candidateFallback, fallback != effectiveActiveModel {
+                    let fallbackBest = QuotaStrategies.selectBestProfile(
+                        candidates: candidates,
+                        quotas: quotas,
+                        activeThreads: threads,
+                        maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
+                        requestedModel: fallback,
+                        currentlyActive: currentProfile,
+                        strategy: strategy
+                    )
+                    if let fb = fallbackBest, (fb.isEligible || fb.isSoftOverflow) {
+                        fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Notice: Model '\(effectiveActiveModel ?? "default")' is depleted across pool. Falling back to '\(fallback)' on '\(fb.profileName)' (\(Int(fb.quotaRemaining * 100))% quota).\n", stderr)
+                        candidateBest = fb
+                        effectiveActiveModel = fallback
+                        currentArgs = Self.rewriteArgumentsForModel(arguments: currentArgs, newModel: fallback)
+                    }
+                }
+            }
+
+            guard let best = candidateBest, (best.isEligible || best.isSoftOverflow) else {
                 fputs("\u{001B}[1;31m[agymux] No available profile has sufficient quota (>5%) or free capacity.\u{001B}[0m\n", stderr)
                 if let lastData = lastFailedOutput {
                     FileHandle.standardOutput.write(lastData)
@@ -183,7 +217,7 @@ public final class SessionSupervisor: Sendable {
                 ConversationStickinessStore.shared.recordUsage(
                     conversationId: convId,
                     profileName: best.profileName,
-                    model: requestedModel ?? "gemini-3.8-flash-high"
+                    model: effectiveActiveModel ?? "gemini-3.8-flash-high"
                 )
             }
             currentArgs = Self.rewriteArgumentsForResume(arguments: currentArgs, conversationId: resolvedConversationId)
@@ -308,5 +342,37 @@ public final class SessionSupervisor: Sendable {
             newArgs.append(arg)
         }
         return ["--conversation", convId] + newArgs
+    }
+
+    /// Rewrites arguments to replace or inject a new model option.
+    public static func rewriteArgumentsForModel(arguments: [String], newModel: String) -> [String] {
+        var newArgs: [String] = []
+        var skipNext = false
+        var replaced = false
+        for (index, arg) in arguments.enumerated() {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if arg == "--model" {
+                if index + 1 < arguments.endIndex {
+                    newArgs.append("--model")
+                    newArgs.append(newModel)
+                    skipNext = true
+                    replaced = true
+                }
+                continue
+            }
+            if arg.hasPrefix("--model=") {
+                newArgs.append("--model=\(newModel)")
+                replaced = true
+                continue
+            }
+            newArgs.append(arg)
+        }
+        if !replaced {
+            newArgs = ["--model", newModel] + newArgs
+        }
+        return newArgs
     }
 }

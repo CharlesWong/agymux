@@ -55,6 +55,7 @@ struct AgymuxCLI {
           agyx --conversation <id>          Resume a specific conversation ID
           agyx --profile <name>             Explicitly target a profile (allows Reserved pool)
           agyx --model <model>              Override model (e.g. gemini-3.8-flash-high, claude-sonnet-4-6)
+          agyx --fallback-model <model>     Fallback model if primary model quota is depleted (e.g. gemini-3.8-flash)
           agyx resume                       Shortcut for 'agyx -c'
 
         AGY sessions always run with --dangerously-skip-permissions (auto-approve tools).
@@ -63,12 +64,13 @@ struct AgymuxCLI {
           agyx pool status                  Display live multi-account quota & concurrency dashboard
           agyx pool set <name> <category>   Set profile category (auto | reserved)
           agyx quota [profile]              Detailed breakdown of 5-hour and weekly quota buckets
-          agyx config set <key> <value>     Configure defaults (model, strategy, max-threads, reserved-fallback)
+          agyx config set <key> <value>     Configure defaults (model, fallback-model, strategy, max-threads, reserved-fallback)
           agyx doctor                       Verify toolchain, Keychain, aisw, and profile health
           agyx help                         Show this help message
 
         \u{001B}[1mCONFIG KEYS:\u{001B}[0m
           model               Default model (default: gemini-3.8-flash-high)
+          fallback-model      Default fallback model (e.g. gemini-3.8-flash-high, auto, or none)
           strategy            smart (default), max-headroom, harvest, balanced, model-adaptive
           max-threads         Max active threads per profile (default: 3)
           reserved-fallback   prompt (default), never, auto
@@ -105,6 +107,7 @@ struct AgymuxCLI {
         var forwardedArgs: [String] = []
         var explicitProfile: String?
         var userSpecifiedModel: String?
+        var userFallbackModel: String?
         var strategyOverride: QuotaStrategy?
 
         var i = 0
@@ -131,6 +134,18 @@ struct AgymuxCLI {
             } else if arg.hasPrefix("--model=") {
                 userSpecifiedModel = PoolManager.normalizeModelName(String(arg.dropFirst("--model=".count)))
                 forwardedArgs.append("--model=\(userSpecifiedModel!)")
+                i += 1
+                continue
+            } else if arg == "--fallback-model" || arg == "--fallback" || arg == "-f", i + 1 < rawArgs.count {
+                userFallbackModel = PoolManager.normalizeModelName(rawArgs[i + 1])
+                i += 2
+                continue
+            } else if arg.hasPrefix("--fallback-model=") {
+                userFallbackModel = PoolManager.normalizeModelName(String(arg.dropFirst("--fallback-model=".count)))
+                i += 1
+                continue
+            } else if arg.hasPrefix("--fallback=") {
+                userFallbackModel = PoolManager.normalizeModelName(String(arg.dropFirst("--fallback=".count)))
                 i += 1
                 continue
             }
@@ -163,6 +178,7 @@ struct AgymuxCLI {
         // 3. Configured default model
         let convModel = (isContinuation && targetConvId != nil) ? stickinessStore.record(for: targetConvId!)?.model : nil
         var effectiveModel = userSpecifiedModel ?? convModel ?? config.defaultModel
+        let effectiveFallbackModel = userFallbackModel ?? config.fallbackModel
 
         // Explicitly inject --model if user did not specify one (ensures agy uses the model agymux scheduled for)
         if userSpecifiedModel == nil {
@@ -296,35 +312,47 @@ struct AgymuxCLI {
 
             var targetProfileResolved = chosen
 
-            // If auto pool had no candidate for requested model, check if model auto-adaptation is possible
-            if targetProfileResolved.isEmpty && userSpecifiedModel == nil {
-                let isCurrentlyClaude = QuotaSnapshot.isThirdPartyModel(effectiveModel)
-                let altModel = isCurrentlyClaude ? "gemini-3.8-flash-high" : "claude-sonnet-4-6"
-                let altBest = QuotaStrategies.selectBestProfile(
-                    candidates: candidates,
-                    quotas: quotas,
-                    activeThreads: concurrencyGuard.allActiveThreadCounts(),
-                    maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
-                    requestedModel: altModel,
-                    strategy: activeStrategy
-                )
-                if let alt = altBest, (alt.isEligible || alt.isSoftOverflow) {
-                    try? concurrencyGuard.registerSession(
-                        pid: getpid(),
-                        profileName: alt.profileName,
-                        conversationId: targetConvId,
-                        cwd: FileManager.default.currentDirectoryPath,
-                        arguments: forwardedArgs
-                    )
-                    fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Notice: Model '\(effectiveModel)' is depleted or busy. Auto-adapting to '\(altModel)' on '\(alt.profileName)' (\(Int(alt.quotaRemaining * 100))% quota).\n", stderr)
-                    effectiveModel = altModel
-                    if let modelIdx = forwardedArgs.firstIndex(of: "--model"), modelIdx + 1 < forwardedArgs.count {
-                        forwardedArgs[modelIdx + 1] = altModel
+            // If auto pool had no candidate for requested model, check if fallback model or auto-adaptation is possible
+            if targetProfileResolved.isEmpty {
+                let candidateFallback: String? = {
+                    if let explicitFallback = effectiveFallbackModel {
+                        if explicitFallback.lowercased() == "auto" {
+                            let isCurrentlyClaude = QuotaSnapshot.isThirdPartyModel(effectiveModel)
+                            return isCurrentlyClaude ? "gemini-3.8-flash-high" : "claude-sonnet-4-6"
+                        }
+                        return explicitFallback
+                    } else if userSpecifiedModel == nil {
+                        let isCurrentlyClaude = QuotaSnapshot.isThirdPartyModel(effectiveModel)
+                        return isCurrentlyClaude ? "gemini-3.8-flash-high" : "claude-sonnet-4-6"
                     }
-                    candidateBestRationale = alt.rationale
-                    candidateBestThreads = alt.activeThreads
-                    candidateBestQuota = alt.quotaRemaining
-                    targetProfileResolved = alt.profileName
+                    return nil
+                }()
+
+                if let altModel = candidateFallback, altModel != effectiveModel {
+                    let altBest = QuotaStrategies.selectBestProfile(
+                        candidates: candidates,
+                        quotas: quotas,
+                        activeThreads: concurrencyGuard.allActiveThreadCounts(),
+                        maxSlotsPerProfile: config.maxActiveThreadsPerProfile,
+                        requestedModel: altModel,
+                        strategy: activeStrategy
+                    )
+                    if let alt = altBest, (alt.isEligible || alt.isSoftOverflow) {
+                        try? concurrencyGuard.registerSession(
+                            pid: getpid(),
+                            profileName: alt.profileName,
+                            conversationId: targetConvId,
+                            cwd: FileManager.default.currentDirectoryPath,
+                            arguments: forwardedArgs
+                        )
+                        fputs("\u{001B}[1;33m[agymux]\u{001B}[0m Notice: Model '\(effectiveModel)' has no remaining quota across pool. Falling back to '\(altModel)' on '\(alt.profileName)' (\(Int(alt.quotaRemaining * 100))% quota).\n", stderr)
+                        effectiveModel = altModel
+                        forwardedArgs = SessionSupervisor.rewriteArgumentsForModel(arguments: forwardedArgs, newModel: altModel)
+                        candidateBestRationale = alt.rationale
+                        candidateBestThreads = alt.activeThreads
+                        candidateBestQuota = alt.quotaRemaining
+                        targetProfileResolved = alt.profileName
+                    }
                 }
             }
 
@@ -390,7 +418,7 @@ struct AgymuxCLI {
                 } else {
                     fputs("\u{001B}[1;31magymux: Could not select an available profile with remaining quota for model '\(effectiveModel)'.\u{001B}[0m\n", stderr)
                     fputs("  • Check live quota breakdown with: \u{001B}[1magyx pool status\u{001B}[0m\n", stderr)
-                    fputs("  • Switch model family: \u{001B}[1magyx --model claude-sonnet-4-6 -c\u{001B}[0m\n", stderr)
+                    fputs("  • Fallback to alternative model: \u{001B}[1magyx --model \(effectiveModel) --fallback-model gemini-3.8-flash -c\u{001B}[0m\n", stderr)
                     fputs("  • Increase concurrency slots: \u{001B}[1magyx config set max-threads 5\u{001B}[0m\n", stderr)
                     exit(1)
                 }
@@ -415,6 +443,7 @@ struct AgymuxCLI {
                 arguments: forwardedArgs,
                 strategy: activeStrategy,
                 requestedModel: effectiveModel,
+                fallbackModel: effectiveFallbackModel,
                 entrySignalState: entrySignalState
             )
 
@@ -600,6 +629,16 @@ struct AgymuxCLI {
                 poolManager.setModel(normalized)
                 print("Default model set to '\(normalized)'.")
                 return
+            } else if key == "fallback-model" || key == "default-fallback-model" {
+                if val.isEmpty || val == "none" || val == "null" || val == "off" {
+                    poolManager.setFallbackModel(nil)
+                    print("Default fallback model cleared.")
+                } else {
+                    let normalized = val.lowercased() == "auto" ? "auto" : PoolManager.normalizeModelName(val)
+                    poolManager.setFallbackModel(normalized)
+                    print("Default fallback model set to '\(normalized)'.")
+                }
+                return
             } else if key == "strategy" {
                 guard QuotaStrategy(rawValue: val.lowercased()) != nil else {
                     print("Unknown strategy '\(val)'. Valid: \(QuotaStrategy.allCases.map(\.rawValue).joined(separator: ", "))")
@@ -645,8 +684,9 @@ struct AgymuxCLI {
         print("""
         \u{001B}[1mCurrent Configuration (~/.agymux/pools.json & stickiness.json):\u{001B}[0m
           Default Model:         \(config.defaultModel)
+          Fallback Model:        \(config.fallbackModel ?? "none (or auto-adapt)")
           Default Strategy:      \(config.defaultStrategy)
-          Max Slots/Profile:     \(config.maxActiveThreadsPerProfile) (default: 3)
+          Max Slots/Profile:     \(config.maxActiveThreadsPerProfile) (default: 5)
           Reserved Fallback:     \(config.reservedFallbackMode) (prompt | never | auto)
           Stickiness Min Quota:  \(Int(stickConfig.minStickinessQuota * 100))% (prompt cache preservation)
           Reserved Pool:         \(config.reserved.joined(separator: ", "))
@@ -671,6 +711,7 @@ struct AgymuxCLI {
         print("   • Auto Pool (\(config.auto.count)):     \(config.auto.joined(separator: ", "))")
         print("   • Reserved Pool (\(config.reserved.count)): \(config.reserved.joined(separator: ", "))")
         print("   • Default Model:         \(config.defaultModel)")
+        print("   • Fallback Model:        \(config.fallbackModel ?? "none (auto-adapt)")")
         print("   • Max Slots per Profile: \(config.maxActiveThreadsPerProfile)")
         print("   • Reserved Fallback:     \(config.reservedFallbackMode)")
 

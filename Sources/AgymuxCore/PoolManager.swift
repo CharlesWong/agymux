@@ -9,19 +9,21 @@ public struct PoolConfiguration: Codable, Sendable {
     public var version: Int
     public var defaultStrategy: String
     public var defaultModel: String
+    public var fallbackModel: String?
     public var maxActiveThreadsPerProfile: Int
     public var reservedFallbackMode: String // "prompt", "never", "auto"
     public var reserved: [String]
     public var auto: [String]
 
     private enum CodingKeys: String, CodingKey {
-        case version, defaultStrategy, defaultModel, maxActiveThreadsPerProfile, reservedFallbackMode, reserved, auto
+        case version, defaultStrategy, defaultModel, fallbackModel, maxActiveThreadsPerProfile, reservedFallbackMode, reserved, auto
     }
 
     public init(
         version: Int = 1,
         defaultStrategy: String = "smart",
         defaultModel: String = "gemini-3.8-flash-high",
+        fallbackModel: String? = nil,
         maxActiveThreadsPerProfile: Int = 5,
         reservedFallbackMode: String = "prompt",
         reserved: [String] = [],
@@ -30,6 +32,7 @@ public struct PoolConfiguration: Codable, Sendable {
         self.version = version
         self.defaultStrategy = defaultStrategy
         self.defaultModel = defaultModel
+        self.fallbackModel = fallbackModel
         self.maxActiveThreadsPerProfile = maxActiveThreadsPerProfile
         self.reservedFallbackMode = reservedFallbackMode
         self.reserved = reserved
@@ -41,6 +44,7 @@ public struct PoolConfiguration: Codable, Sendable {
         self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         self.defaultStrategy = try container.decodeIfPresent(String.self, forKey: .defaultStrategy) ?? "smart"
         self.defaultModel = try container.decodeIfPresent(String.self, forKey: .defaultModel) ?? "gemini-3.8-flash-high"
+        self.fallbackModel = try container.decodeIfPresent(String.self, forKey: .fallbackModel)
         self.maxActiveThreadsPerProfile = try container.decodeIfPresent(Int.self, forKey: .maxActiveThreadsPerProfile) ?? 5
         self.reservedFallbackMode = try container.decodeIfPresent(String.self, forKey: .reservedFallbackMode) ?? "prompt"
         self.reserved = try container.decodeIfPresent([String].self, forKey: .reserved) ?? []
@@ -66,22 +70,23 @@ public final class PoolManager: Sendable {
     public static func normalizeModelName(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
-        if lower == "gemini 3.8 flash high" || lower == "gemini-3.8-flash-high" || lower == "flash high" {
+        if lower == "gemini 3.8 flash high" || lower == "gemini-3.8-flash-high" || lower == "flash high" ||
+           lower == "gemini 3.8 flash" || lower == "gemini-3.8-flash" || lower == "3.8 flash" || lower == "flash" {
             return "gemini-3.8-flash-high"
         }
-        if lower == "gemini 3.8 flash medium" || lower == "gemini-3.8-flash-medium" {
+        if lower == "gemini 3.8 flash medium" || lower == "gemini-3.8-flash-medium" || lower == "flash medium" {
             return "gemini-3.8-flash-medium"
         }
-        if lower == "gemini 3.8 flash low" || lower == "gemini-3.8-flash-low" {
+        if lower == "gemini 3.8 flash low" || lower == "gemini-3.8-flash-low" || lower == "flash low" {
             return "gemini-3.8-flash-low"
         }
-        if lower == "gemini 3.7 flash high" || lower == "gemini-3.7-flash-high" {
+        if lower == "gemini 3.7 flash high" || lower == "gemini-3.7-flash-high" || lower == "gemini 3.7 flash" || lower == "3.7 flash" {
             return "gemini-3.7-flash-high"
         }
-        if lower == "gemini 3.1 pro high" || lower == "gemini-3.1-pro-high" {
+        if lower == "gemini 3.1 pro high" || lower == "gemini-3.1-pro-high" || lower == "gemini 3.1 pro" || lower == "3.1 pro" || lower == "pro" {
             return "gemini-3.1-pro-high"
         }
-        if lower == "claude sonnet 4.6" || lower == "claude-sonnet-4-6" {
+        if lower == "claude sonnet 4.6" || lower == "claude-sonnet-4-6" || lower == "claude sonnet" || lower == "sonnet" || lower == "claude" {
             return "claude-sonnet-4-6"
         }
         if lower == "claude opus 4.6" || lower == "claude-opus-4-6-thinking" || lower.contains("claude opus 4.6") {
@@ -239,6 +244,12 @@ public final class PoolManager: Sendable {
     public func setModel(_ model: String) {
         var config = loadConfig()
         config.defaultModel = Self.normalizeModelName(model)
+        saveConfig(config)
+    }
+
+    public func setFallbackModel(_ model: String?) {
+        var config = loadConfig()
+        config.fallbackModel = model.map { Self.normalizeModelName($0) }
         saveConfig(config)
     }
 
