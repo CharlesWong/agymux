@@ -79,28 +79,55 @@ public final class KeychainClient: Sendable {
         try liveCredentialReader(timeout)
     }
 
-    private static func readSecurityCredential(timeout: TimeInterval) throws -> Data {
+    /// Best-effort unlock for headless/GUI sessions with empty keychain password.
+    public static func ensureKeychainUnlocked() {
         let process = Process()
-        let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]
-        process.standardOutput = pipe
+        process.arguments = ["unlock-keychain", "-p", ""]
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+    }
 
-        try process.run()
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
+    private static func readSecurityCredential(timeout: TimeInterval) throws -> Data {
+        let runner = { () -> (Int32, Data) in
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            process.arguments = ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+            } catch {
+                return (-2, Data())
+            }
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            if process.isRunning {
+                process.terminate()
+                return (-1, Data())
+            }
+            let raw = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (process.terminationStatus, raw)
         }
-        if process.isRunning {
-            process.terminate()
+
+        var (status, raw) = runner()
+        if status == 36 || status == -25308 { // errSecInteractionNotAllowed
+            ensureKeychainUnlocked()
+            (status, raw) = runner()
+        }
+        if status == -1 {
             throw KeychainError.timedOut
         }
-        guard process.terminationStatus == 0 else {
-            if process.terminationStatus == 44 { throw KeychainError.itemNotFound }
+        guard status == 0 else {
+            if status == 44 { throw KeychainError.itemNotFound }
             throw KeychainError.unreadableData
         }
-        let raw = pipe.fileHandleForReading.readDataToEndOfFile()
         return AgyCredential.normalizeCapturedSecret(raw)
     }
 
@@ -164,11 +191,17 @@ public final class KeychainClient: Sendable {
             throw KeychainError.activationFailed("Agy Switchboard's credential-only aisw-switchboard bridge is required")
         }
         try verifyBridgeCapability(bridge)
-        let result: BridgeExecutionResult
+        var result: BridgeExecutionResult
         do {
             result = try bridgeRunner(bridge, ["--non-interactive", "--quiet", "use", "antigravity", profileName, "--json"], 40)
         } catch {
             throw KeychainError.activationFailed(Self.sanitizeCredentialLeak(error.localizedDescription))
+        }
+        if result.exitCode != 0 && (result.standardError.contains("User interaction is not allowed") || result.standardError.contains("-25308")) {
+            Self.ensureKeychainUnlocked()
+            if let retried = try? bridgeRunner(bridge, ["--non-interactive", "--quiet", "use", "antigravity", profileName, "--json"], 40), retried.exitCode == 0 {
+                result = retried
+            }
         }
         guard result.exitCode == 0 else {
             let detail = Self.sanitizeCredentialLeak(result.standardError.trimmingCharacters(in: .whitespacesAndNewlines))

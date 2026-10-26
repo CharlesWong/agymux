@@ -45,12 +45,22 @@ public enum QuotaParsers {
                 let window = QuotaWindowKind(normalizing: windowRaw)
                 let isDisabled = (bucket["disabled"] as? Bool) ?? false
                 let description = string(bucket["description"])?.lowercased() ?? ""
-                let isExhaustedByDesc = description.contains("hit your weekly limit")
-                    || description.contains("limit does not currently apply")
 
                 var remaining = number(bucket["remainingFraction"] ?? bucket["remaining_fraction"])
-                if isDisabled || isExhaustedByDesc {
+                if isDisabled {
                     remaining = 0.0
+                } else if window == .weekly {
+                    // Only zero weekly if the user actually hit their weekly limit
+                    if description.contains("hit your weekly limit") {
+                        remaining = 0.0
+                    }
+                } else if window == .fiveHour {
+                    // Zero 5-hour if user hit weekly limit or 5-hour limit or 5-hour limit does not apply
+                    if description.contains("hit your 5-hour limit")
+                        || description.contains("hit your weekly limit")
+                        || description.contains("5-hour limit does not currently apply") {
+                        remaining = 0.0
+                    }
                 }
                 let resetAt = date(bucket["resetTime"] ?? bucket["reset_time"])
                 guard remaining != nil || resetAt != nil else { continue }
@@ -96,6 +106,37 @@ public enum QuotaParsers {
                     resolvedMetrics.append(m)
                 }
             }
+        }
+
+        if !resolvedMetrics.contains(where: { $0.group == .gemini }) {
+            // Google Cloud PA Quota API does not return a Gemini group because 1st-party
+            // Gemini models are unmetered in Antigravity. Synthesize 100% metrics.
+            resolvedMetrics.append(
+                QuotaMetric(
+                    group: .gemini,
+                    scope: .geminiFamily,
+                    modelIDs: ["Gemini Flash", "Gemini Pro"],
+                    window: .weekly,
+                    remainingFraction: 1.0,
+                    resetAt: nil,
+                    source: .cloudQuotaSummary,
+                    fetchedAt: fetchedAt,
+                    confidence: .high
+                )
+            )
+            resolvedMetrics.append(
+                QuotaMetric(
+                    group: .gemini,
+                    scope: .geminiFamily,
+                    modelIDs: ["Gemini Flash", "Gemini Pro"],
+                    window: .fiveHour,
+                    remainingFraction: 1.0,
+                    resetAt: nil,
+                    source: .cloudQuotaSummary,
+                    fetchedAt: fetchedAt,
+                    confidence: .high
+                )
+            )
         }
 
         guard !resolvedMetrics.isEmpty else { throw QuotaParseError.noQuotaData(nil) }

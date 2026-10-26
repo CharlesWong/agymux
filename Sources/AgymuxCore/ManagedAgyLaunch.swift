@@ -33,6 +33,36 @@ public struct ManagedAgyLaunch: Sendable, Equatable {
         ["run", "--"] + bypassPermissionArguments
     }
 
+    /// Stream drivers submit turns over stdin; positional prompts and the
+    /// option delimiter must never be mistaken for an input-format option.
+    var usesStreamJSONInput: Bool {
+        var streamJSON = false
+        var index = officialArguments.startIndex
+        while index < officialArguments.endIndex {
+            let argument = officialArguments[index]
+            guard argument != "--", argument.hasPrefix("-") else { break }
+            if argument.hasPrefix("--input-format=") {
+                streamJSON = argument == "--input-format=stream-json"
+            } else if Self.optionsWithSeparateValue.contains(argument) {
+                let valueIndex = index + 1
+                if valueIndex < officialArguments.endIndex, officialArguments[valueIndex] != "--" {
+                    if argument == "--input-format" {
+                        streamJSON = officialArguments[valueIndex] == "stream-json"
+                    }
+                    index = valueIndex
+                }
+            }
+            index += 1
+        }
+        return streamJSON
+    }
+
+    func configurePrintIO(_ process: Process, capture: Pipe, input: FileHandle = .standardInput, output: FileHandle = .standardOutput, error: FileHandle = .standardError) {
+        process.standardInput = usesStreamJSONInput ? input : .nullDevice
+        process.standardOutput = usesStreamJSONInput ? output : capture
+        process.standardError = usesStreamJSONInput ? error : capture
+    }
+
     /// Keep the caller's argv intact for bookkeeping and session migration,
     /// while enforcing agyx's launch policy at the final handoff to official
     /// AGY. Put the canonical option first, before any positional prompt, then

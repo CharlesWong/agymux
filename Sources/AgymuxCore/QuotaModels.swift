@@ -229,11 +229,13 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     public func isDepleted(for requestedModel: String? = nil, at now: Date = .now) -> Bool {
         let isClaudeRequested = Self.isThirdPartyModel(requestedModel)
         if isClaudeRequested {
-            guard let t5 = thirdPartyFiveHour, let tw = thirdPartyWeekly else { return true }
+            guard let t5 = thirdPartyFiveHour ?? thirdPartyWeekly, let tw = thirdPartyWeekly ?? thirdPartyFiveHour else { return true }
             return t5.isDepleted(at: now) || tw.isDepleted(at: now)
         } else {
-            guard let g5 = geminiFiveHour, let gw = geminiWeekly else { return true }
-            return g5.isDepleted(at: now) || gw.isDepleted(at: now)
+            if let g5 = geminiFiveHour ?? geminiWeekly, let gw = geminiWeekly ?? geminiFiveHour {
+                return g5.isDepleted(at: now) || gw.isDepleted(at: now)
+            }
+            return metrics.isEmpty
         }
     }
 
@@ -274,19 +276,30 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     }
 
     public func fiveHourFraction(for requestedModel: String? = nil) -> Double {
-        Self.isThirdPartyModel(requestedModel)
-            ? (thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0)
-            : (geminiFiveHour?.clampedRemainingFraction ?? 0.0)
+        if Self.isThirdPartyModel(requestedModel) {
+            return (thirdPartyFiveHour ?? thirdPartyWeekly)?.clampedRemainingFraction ?? 0.0
+        } else {
+            return (geminiFiveHour ?? geminiWeekly)?.clampedRemainingFraction ?? 1.0
+        }
     }
 
     public func weeklyFraction(for requestedModel: String? = nil) -> Double {
-        Self.isThirdPartyModel(requestedModel)
-            ? (thirdPartyWeekly?.clampedRemainingFraction ?? 0.0)
-            : (geminiWeekly?.clampedRemainingFraction ?? 0.0)
+        if Self.isThirdPartyModel(requestedModel) {
+            return (thirdPartyWeekly ?? thirdPartyFiveHour)?.clampedRemainingFraction ?? 0.0
+        } else {
+            return (geminiWeekly ?? geminiFiveHour)?.clampedRemainingFraction ?? 1.0
+        }
     }
 
     public func bottleneckFraction(for requestedModel: String? = nil) -> Double {
-        min(fiveHourFraction(for: requestedModel), weeklyFraction(for: requestedModel))
+        let isClaude = Self.isThirdPartyModel(requestedModel)
+        if isClaude {
+            let candidates = [thirdPartyFiveHour?.clampedRemainingFraction, thirdPartyWeekly?.clampedRemainingFraction].compactMap { $0 }
+            return candidates.min() ?? 0.0
+        } else {
+            let candidates = [geminiFiveHour?.clampedRemainingFraction, geminiWeekly?.clampedRemainingFraction].compactMap { $0 }
+            return candidates.min() ?? 1.0
+        }
     }
 
     /// Whether this profile has a brand new, unused 100% weekly quota ready to kick off its 7-day counter.

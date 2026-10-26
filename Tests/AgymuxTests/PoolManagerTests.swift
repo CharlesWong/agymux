@@ -62,6 +62,19 @@ struct PoolManagerTests {
         let data = try encoder.encode(initialConfig)
         try data.write(to: configURL)
 
+        let aiswMock: [String: Any] = [
+            "profiles": [
+                "antigravity": [
+                    "current": [:],
+                    "charleswongjy": [:],
+                    "quavolve": [:],
+                    "mitnick162": [:]
+                ]
+            ]
+        ]
+        let aiswData = try JSONSerialization.data(withJSONObject: aiswMock)
+        try aiswData.write(to: aiswURL)
+
         let manager = PoolManager(configURL: configURL, aiswConfigURL: aiswURL)
         manager.moveAllToAuto()
         let loaded = manager.loadConfig()

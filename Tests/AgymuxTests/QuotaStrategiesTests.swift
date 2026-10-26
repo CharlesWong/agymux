@@ -382,8 +382,8 @@ struct QuotaStrategiesTests {
         let q1 = makeSnapshot(profileID: "p1", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.80)
         // p2: depleted (<0.5%)
         let q2 = makeSnapshot(profileID: "p2", gemini5h: 0.002, thirdParty5h: 0.002, geminiWeekly: 0.002)
-        // p3: weekly near-depleted (<10%)
-        let q3 = makeSnapshot(profileID: "p3", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.08)
+        // p3: weekly depleted (<0.5%)
+        let q3 = makeSnapshot(profileID: "p3", gemini5h: 0.80, thirdParty5h: 0.80, geminiWeekly: 0.003)
         // p4: healthy quota with free slot
         let q4 = makeSnapshot(profileID: "p4", gemini5h: 0.60, thirdParty5h: 0.60, geminiWeekly: 0.60)
 

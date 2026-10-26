@@ -518,8 +518,8 @@ struct AgymuxCLI {
                 let profileDisplay = email.isEmpty || email == p ? p : "\(p) (\(email))"
 
                 let snap = quotas[p]
-                let g5 = snap?.geminiFiveHour?.clampedRemainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
-                let gw = snap?.geminiWeekly?.clampedRemainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
+                let g5 = snap?.geminiFiveHour?.clampedRemainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? (snap != nil ? "100%" : "--")
+                let gw = snap?.geminiWeekly?.clampedRemainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? (snap != nil ? "100%" : "--")
                 let geminiStr = "\(g5) / \(gw)"
 
                 let t5 = snap?.thirdPartyFiveHour?.clampedRemainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
@@ -543,8 +543,8 @@ struct AgymuxCLI {
                 let maxSlots = config.maxActiveThreadsPerProfile
                 let slotStr = "\(inUse) / \(maxSlots)"
 
-                let geminiAvailable = (snap?.geminiFiveHour?.clampedRemainingFraction ?? 0.0) >= 0.01
-                    && (snap?.geminiWeekly?.clampedRemainingFraction ?? 0.0) >= 0.005
+                let geminiAvailable = (snap?.geminiFiveHour?.clampedRemainingFraction ?? (snap != nil ? 1.0 : 0.0)) >= 0.01
+                    && (snap?.geminiWeekly?.clampedRemainingFraction ?? (snap != nil ? 1.0 : 0.0)) >= 0.005
                 let thirdPartyAvailable = (snap?.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0) >= 0.01
                     && (snap?.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0) >= 0.005
 

@@ -128,16 +128,9 @@ public final class ConversationStickinessStore: Sendable {
         }
 
         // 3. Bottleneck quota fraction check
-        let isClaudeRequested = QuotaSnapshot.isThirdPartyModel(requestedModel)
-
-        let g5 = snapshot.geminiFiveHour?.clampedRemainingFraction ?? 0.0
-        let gw = snapshot.geminiWeekly?.clampedRemainingFraction ?? 0.0
-        let t5 = snapshot.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0
-        let tw = snapshot.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0
-
-        let fFrac = isClaudeRequested ? t5 : g5
-        let wFrac = isClaudeRequested ? tw : gw
-        let bottleneckQuota = min(fFrac, wFrac)
+        let fFrac = snapshot.fiveHourFraction(for: requestedModel)
+        let wFrac = snapshot.weeklyFraction(for: requestedModel)
+        let bottleneckQuota = snapshot.bottleneckFraction(for: requestedModel)
 
         let fPct = Int((fFrac * 100).rounded())
         let wPct = Int((wFrac * 100).rounded())

@@ -264,9 +264,9 @@ public final class SessionSupervisor: Sendable {
 
         // Non-interactive / print mode: capture stdout/stderr to detect quota messages
         let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        process.standardInput = FileHandle.nullDevice
+        // A stream-json driver owns its input pipe. Discarding that pipe
+        // silently turns every request into a zero-turn successful session.
+        launch.configurePrintIO(process, capture: pipe)
 
         try process.run()
         let childPid = process.processIdentifier
@@ -287,6 +287,13 @@ public final class SessionSupervisor: Sendable {
             }
         }
 
+        if launch.usesStreamJSONInput {
+            // Stream drivers wait for init before submitting a frame. Forward
+            // stdout live and keep diagnostics on stderr, without buffering.
+            // A consumed stdin stream cannot be replayed during migration.
+            process.waitUntilExit()
+            return (process.terminationStatus, detectedConvId, false, nil)
+        }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 

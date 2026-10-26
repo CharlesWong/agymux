@@ -146,7 +146,7 @@ struct QuotaParsersTests {
                             "bucketId": "3p-weekly",
                             "window": "weekly",
                             "remainingFraction": 0,
-                            "resetTime": "2026-09-19T03:16:55Z",
+                            "resetTime": "2030-09-19T03:16:55Z",
                             "description": "You have hit your weekly limit, it refreshes in 2 days, 4 hours."
                         },
                         {
@@ -154,7 +154,7 @@ struct QuotaParsersTests {
                             "window": "5h",
                             "disabled": true,
                             "remainingFraction": 1,
-                            "resetTime": "2026-09-17T03:39:13Z",
+                            "resetTime": "2030-09-17T03:39:13Z",
                             "description": "You have hit your weekly limit, the 5-hour limit does not currently apply."
                         }
                     ]
@@ -178,6 +178,98 @@ struct QuotaParsersTests {
         #expect(t5.clampedRemainingFraction == 0.0)
         #expect(snapshot.isDepleted(for: "claude-3-7-sonnet"))
         #expect(snapshot.bottleneckFraction(for: "claude-3-7-sonnet") == 0.0)
+        #expect(!snapshot.isDepleted(for: "gemini-3.8-flash-high"))
+        #expect(snapshot.bottleneckFraction(for: "gemini-3.8-flash-high") == 1.0)
+    }
+
+    @Test("PA response with only 3p models synthesizes 100% unmetered Gemini metrics")
+    func testCloudQuotaSummarySynthesizesUnmeteredGemini() throws {
+        let jsonString = """
+        {
+            "groups": [
+                {
+                    "displayName": "Claude and GPT models",
+                    "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                    "buckets": [
+                        {
+                            "bucketId": "3p-weekly",
+                            "window": "weekly",
+                            "remainingFraction": 0.4588232,
+                            "resetTime": "2030-10-31T23:30:44Z"
+                        },
+                        {
+                            "bucketId": "3p-5h",
+                            "window": "5h",
+                            "remainingFraction": 1.0,
+                            "resetTime": "2030-10-26T06:01:22Z"
+                        }
+                    ]
+                }
+            ]
+        }
+        """
+
+        let data = Data(jsonString.utf8)
+        let snapshot = try QuotaParsers.cloudQuotaSummary(
+            data: data,
+            profileID: "current",
+            account: "test@example.com",
+            tier: "pro"
+        )
+
+        let gw = try #require(snapshot.geminiWeekly)
+        #expect(gw.clampedRemainingFraction == 1.0)
+
+        let g5 = try #require(snapshot.geminiFiveHour)
+        #expect(g5.clampedRemainingFraction == 1.0)
+
+        #expect(!snapshot.isDepleted(for: "gemini-3.8-flash-high"))
+        #expect(snapshot.bottleneckFraction(for: "gemini-3.8-flash-high") == 1.0)
+    }
+
+    @Test("Five-hour limit reached does not zero healthy weekly quota despite PA description note")
+    func testFiveHourDepletedDoesNotZeroHealthyWeeklyQuota() throws {
+        let jsonString = """
+        {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "description": "Models within this group: Gemini Flash, Gemini Pro",
+                    "buckets": [
+                        {
+                            "bucketId": "gemini-weekly",
+                            "window": "weekly",
+                            "remainingFraction": 0.88829035,
+                            "resetTime": "2030-10-13T17:57:46Z",
+                            "description": "You have hit your 5-hour limit, so the weekly limit does not currently apply. Your 5-hour limit will refresh in 2 hours, 29 minutes."
+                        },
+                        {
+                            "bucketId": "gemini-5h",
+                            "window": "5h",
+                            "remainingFraction": 0,
+                            "resetTime": "2030-10-06T22:01:18Z",
+                            "description": "You have hit your 5-hour limit, it will refresh in 2 hours, 29 minutes."
+                        }
+                    ]
+                }
+            ]
+        }
+        """
+
+        let data = Data(jsonString.utf8)
+        let snapshot = try QuotaParsers.cloudQuotaSummary(
+            data: data,
+            profileID: "pmfgku",
+            account: "pmfgku@gmail.com",
+            tier: "pro"
+        )
+
+        let gw = try #require(snapshot.geminiWeekly)
+        #expect(abs((gw.clampedRemainingFraction ?? 0.0) - 0.88829035) < 0.0001)
+
+        let g5 = try #require(snapshot.geminiFiveHour)
+        #expect(g5.clampedRemainingFraction == 0.0)
+        #expect(snapshot.bottleneckFraction(for: "gemini-3.8-flash-high") == 0.0)
     }
 
     @Test("Decoding QuotaSnapshot from JSON automatically resolves cascading exhaustion from external caches")

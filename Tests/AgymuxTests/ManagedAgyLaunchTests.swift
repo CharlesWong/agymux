@@ -1,8 +1,71 @@
 import Foundation
+import Darwin
 import Testing
 @testable import AgymuxCore
 
 struct ManagedAgyLaunchTests {
+    @Test func streamInputDeliversExactBytesAndEOFToChildWhilePrintReceivesNoInput() throws {
+        let frame = Data("{\"event\":\"user\",\"message\":{\"content\":\"fictional pipe test\"}}\n".utf8)
+        for (arguments, expected) in [(["--input-format", "stream-json", "--print="], frame), (["--print=fictional prompt"], Data())] {
+            let launch = try ManagedAgyLaunch(realAgyPath: "/bin/cat", profileName: "fictional", officialArguments: arguments, launcherPath: "/bin/cat")
+            let input = Pipe()
+            let output = Pipe()
+            try input.fileHandleForWriting.write(contentsOf: frame)
+            try input.fileHandleForWriting.close()
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/bin/cat")
+            launch.configurePrintIO(child, capture: output, input: input.fileHandleForReading, output: output.fileHandleForWriting, error: .nullDevice)
+            try child.run()
+            try? output.fileHandleForWriting.close()
+            let actual = output.fileHandleForReading.readDataToEndOfFile()
+            child.waitUntilExit()
+            #expect(child.terminationStatus == 0)
+            #expect(actual == expected)
+            try input.fileHandleForReading.close()
+            try output.fileHandleForReading.close()
+        }
+    }
+    @Test func streamDriverReceivesReadyAndResponseBeforeClosingItsInput() throws {
+        let launch = try ManagedAgyLaunch(realAgyPath: "/bin/sh", profileName: "fictional", officialArguments: ["--input-format=stream-json", "--print="], launcherPath: "/bin/sh")
+        let input = Pipe(), output = Pipe(), capture = Pipe()
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sh")
+        child.arguments = ["-c", "printf 'ready\\n'; IFS= read -r frame; printf '%s\\n' \"$frame\"; cat >/dev/null"]
+        launch.configurePrintIO(child, capture: capture, input: input.fileHandleForReading, output: output.fileHandleForWriting, error: .nullDevice)
+        try child.run()
+        try output.fileHandleForWriting.close()
+        defer { if child.isRunning { child.terminate(); child.waitUntilExit() }; try? input.fileHandleForWriting.close() }
+        func readAvailable(_ count: Int) throws -> Data {
+            var descriptor = pollfd(fd: output.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            guard poll(&descriptor, 1, 2000) == 1 else { throw NSError(domain: "StreamIOTest", code: 1) }
+            return output.fileHandleForReading.readData(ofLength: count)
+        }
+        #expect(try readAvailable(6) == Data("ready\n".utf8))
+        let frame = Data("fictional frame\n".utf8)
+        try input.fileHandleForWriting.write(contentsOf: frame)
+        #expect(try readAvailable(frame.count) == frame)
+        #expect(child.isRunning)
+        try input.fileHandleForWriting.close()
+        child.waitUntilExit()
+        #expect(child.terminationStatus == 0)
+    }
+    @Test func streamInputRecognizesOptionsWithoutConsumingPromptLiterals() throws {
+        let cases: [([String], Bool)] = [
+            (["--print=", "--input-format", "stream-json"], true),
+            (["--input-format=stream-json", "--print="], true),
+            (["--input-format", "stream-json", "--input-format=text", "--print="], false),
+            (["--print=", "--input-format", "text"], false),
+            (["--print", "--input-format=stream-json"], false),
+            (["-p", "--input-format", "stream-json"], false),
+            (["--", "--input-format=stream-json"], false),
+            (["a positional prompt", "--input-format", "stream-json"], false),
+            (["--model", "fake", "--input-format", "stream-json", "--print="], true),
+        ]
+        for (arguments, expected) in cases {
+            let launch = try ManagedAgyLaunch(realAgyPath: "/usr/bin/true", profileName: "fictional", officialArguments: arguments, launcherPath: "/usr/bin/true")
+            #expect(launch.usesStreamJSONInput == expected)
+        }
+    }
     @Test func buildsSwitchboardCommandAndBoundEnvironmentWithoutChangingOfficialArguments() throws {
         let fixture = try launcherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.folder) }

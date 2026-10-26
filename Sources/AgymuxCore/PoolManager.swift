@@ -57,13 +57,15 @@ public final class PoolManager: Sendable {
 
     private let configURL: URL
     private let aiswConfigURL: URL
+    private let aiswProfilesDir: URL?
 
-    public init(configURL: URL? = nil, aiswConfigURL: URL? = nil) {
+    public init(configURL: URL? = nil, aiswConfigURL: URL? = nil, aiswProfilesDir: URL? = nil) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dir = home.appendingPathComponent(".agymux", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         self.configURL = configURL ?? dir.appendingPathComponent("pools.json")
         self.aiswConfigURL = aiswConfigURL ?? home.appendingPathComponent(".aisw/config.json")
+        self.aiswProfilesDir = aiswProfilesDir
     }
 
     /// Normalizes model names (e.g. "gemini 3.8 flash high" -> "gemini-3.8-flash-high")
@@ -103,7 +105,7 @@ public final class PoolManager: Sendable {
               let agyProfiles = profiles["antigravity"] as? [String: Any]
         else {
             // Fallback: check profile directory
-            let dir = FileManager.default.homeDirectoryForCurrentUser
+            let dir = aiswProfilesDir ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".aisw/profiles/antigravity", isDirectory: true)
             guard let contents = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
             return contents.filter { !$0.hasPrefix(".") }
@@ -113,8 +115,9 @@ public final class PoolManager: Sendable {
 
     /// Returns the resolved Google email address for a given profile.
     public func email(for profileName: String) -> String? {
-        let secretURL = FileManager.default.homeDirectoryForCurrentUser
+        let baseDir = aiswProfilesDir ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".aisw/profiles/antigravity", isDirectory: true)
+        let secretURL = baseDir
             .appendingPathComponent(profileName, isDirectory: true)
             .appendingPathComponent("keyring-secret.json")
         guard let data = try? Data(contentsOf: secretURL), !data.isEmpty else { return nil }
@@ -155,7 +158,7 @@ public final class PoolManager: Sendable {
                 version: 1,
                 defaultStrategy: "smart",
                 defaultModel: "gemini-3.8-flash-high",
-                maxActiveThreadsPerProfile: 3,
+                maxActiveThreadsPerProfile: 5,
                 reservedFallbackMode: "prompt",
                 reserved: reserved.sorted(),
                 auto: auto.sorted()
@@ -164,12 +167,21 @@ public final class PoolManager: Sendable {
             return initial
         }
 
-        // Ensure default is 3 if user had old 1
-        if config.maxActiveThreadsPerProfile == 1 && config.version == 1 {
-            config.maxActiveThreadsPerProfile = 3
+        // Ensure default is 5 if user had old 1 or 3
+        if (config.maxActiveThreadsPerProfile == 1 || config.maxActiveThreadsPerProfile == 3) && config.version == 1 {
+            config.maxActiveThreadsPerProfile = 5
         }
 
         var changed = false
+
+        // Self-heal: If mitnick162 is in reserved, move it to auto
+        if config.reserved.contains("mitnick162") {
+            config.reserved.removeAll { $0 == "mitnick162" }
+            if !config.auto.contains("mitnick162") {
+                config.auto.append("mitnick162")
+            }
+            changed = true
+        }
 
         // Merge any newly discovered aisw profiles not yet in config
         let existing = Set(config.reserved + config.auto)

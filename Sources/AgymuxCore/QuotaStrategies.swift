@@ -134,27 +134,10 @@ public enum QuotaStrategies {
         let isClaudeRequested = QuotaSnapshot.isThirdPartyModel(requestedModel)
 
         // 2. Extract per-window quota fractions
-        let g5 = snapshot.geminiFiveHour?.clampedRemainingFraction ?? 0.0
-        let gw = snapshot.geminiWeekly?.clampedRemainingFraction ?? 0.0
-        let t5 = snapshot.thirdPartyFiveHour?.clampedRemainingFraction ?? 0.0
-        let tw = snapshot.thirdPartyWeekly?.clampedRemainingFraction ?? 0.0
-
-        let fiveHourFraction: Double
-        let weeklyFraction: Double
-        let fiveHourResetDate: Date?
-        let weeklyResetDate: Date?
-
-        if isClaudeRequested {
-            fiveHourFraction = t5
-            weeklyFraction = tw
-            fiveHourResetDate = snapshot.thirdPartyFiveHour?.resetAt
-            weeklyResetDate = snapshot.thirdPartyWeekly?.resetAt
-        } else {
-            fiveHourFraction = g5
-            weeklyFraction = gw
-            fiveHourResetDate = snapshot.geminiFiveHour?.resetAt
-            weeklyResetDate = snapshot.geminiWeekly?.resetAt
-        }
+        let fiveHourFraction = snapshot.fiveHourFraction(for: requestedModel)
+        let weeklyFraction = snapshot.weeklyFraction(for: requestedModel)
+        let fiveHourResetDate = snapshot.fiveHourResetDate(for: requestedModel)
+        let weeklyResetDate = snapshot.weeklyResetDate(for: requestedModel)
 
         // The bottleneck is always the lower of the two windows
         let quotaFraction = min(fiveHourFraction, weeklyFraction)
