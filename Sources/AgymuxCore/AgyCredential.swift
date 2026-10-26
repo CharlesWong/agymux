@@ -95,4 +95,46 @@ public enum AgyCredential {
 
         return claims["email"] as? String
     }
+
+    /// Synchronizes the active profile's credentials directly to Antigravity CLI's native
+    /// token cache (`~/.gemini/antigravity-cli/antigravity-oauth-token`).
+    public static func syncAntigravityOAuthTokenFile(
+        fromSecretData rawData: Data,
+        profileEmail: String? = nil,
+        overrideURL: URL? = nil
+    ) {
+        let normalized = normalizeCapturedSecret(rawData)
+        guard let text = String(data: normalized, encoding: .utf8) else { return }
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base64Part = cleanText.hasPrefix(keyringPrefix)
+            ? String(cleanText.dropFirst(keyringPrefix.count))
+            : cleanText
+        guard let jsonBytes = Data(base64Encoded: base64Part) ?? cleanText.data(using: .utf8) else { return }
+
+        var finalData = jsonBytes
+        if var json = (try? JSONSerialization.jsonObject(with: jsonBytes)) as? [String: Any] {
+            if json["auth_method"] == nil {
+                json["auth_method"] = "consumer"
+            }
+            if json["id_token_email"] == nil {
+                let email = profileEmail ?? emailIdentity(of: rawData)
+                if let email {
+                    json["id_token_email"] = email
+                }
+            }
+            if let formatted = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                finalData = formatted
+            }
+        }
+
+        let tokenFileURL: URL
+        if let overrideURL {
+            tokenFileURL = overrideURL
+        } else {
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            tokenFileURL = dir.appendingPathComponent("antigravity-oauth-token")
+        }
+        try? finalData.write(to: tokenFileURL, options: [.atomic, .completeFileProtection])
+    }
 }

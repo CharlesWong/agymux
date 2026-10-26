@@ -212,6 +212,7 @@ public final class KeychainClient: Sendable {
               AgyCredential.representsSameAccount(storedTarget, liveVerified) else {
             throw KeychainError.verificationFailed(profileName)
         }
+        AgyCredential.syncAntigravityOAuthTokenFile(fromSecretData: storedTarget)
     }
 
     private func configuredProfile() -> String? {
